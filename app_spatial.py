@@ -51,16 +51,6 @@ def call_groq_api(prompt):
         st.error(f"Groq exception: {e}")
         return None
 
-# ========== INITIALISATION DE L'INDEX D'ONGLET COURANT ==========
-if "current_tab" not in st.session_state:
-    st.session_state.current_tab = 0  # premier onglet par défaut
-
-# ========== PLACEHOLDERS DANS LA SIDEBAR POUR LA PROGRESSION ==========
-st.sidebar.header("📋 Analysis Workflow")
-progress_bar_placeholder = st.sidebar.empty()
-steps_placeholder = st.sidebar.empty()
-st.sidebar.markdown("---")  # Séparateur
-
 # --- 3. INITIALISATION DES DATES EN SESSION STATE ---
 if "dates" not in st.session_state:
     st.session_state.dates = {
@@ -167,6 +157,128 @@ if not raw_dfs:
     st.warning("Please upload or place the three Devis files.")
     st.stop()
 
+# ========== WBS LEVEL SELECTION (HORS ONGLETS) ==========
+st.subheader("WBS Level Selection")
+level_choice = st.selectbox(
+    "Select WBS level for analysis",
+    ["Level 1 (WBS_2)", "Level 2 (WBS_3)", "Level 3 (WBS_4)", "Level 4 (WBS_5)"],
+    index=3,
+    key="level_select"
+)
+# Stocker dans session_state pour les autres onglets
+st.session_state.level_choice = level_choice
+
+level_map = {
+    "Level 1 (WBS_2)": ("WBS_2", 1),
+    "Level 2 (WBS_3)": ("WBS_3", 2),
+    "Level 3 (WBS_4)": ("WBS_4", 3),
+    "Level 4 (WBS_5)": ("WBS_5", 4)
+}
+level_col, level_num = level_map[level_choice]
+
+# ========== GESTION DU MAPPING (HORS ONGLETS) ==========
+st.subheader("Technical Normalization Matrix")
+
+# Construction de la liste des WP pour le niveau choisi
+wp_list = []
+for name, df in raw_dfs.items():
+    codes = df[level_col].unique()
+    for code in codes:
+        wp_list.append({"System": name, "Original WP": code})
+df_init = pd.DataFrame(wp_list).drop_duplicates()
+
+# Gestion du mapping
+MAPPING_FILE = "mapping_hierarchique.csv"
+
+if os.path.exists(MAPPING_FILE):
+    df_mapping_all = pd.read_csv(MAPPING_FILE)
+    required_cols = ['System', 'Original WP', 'Level']
+    if not all(col in df_mapping_all.columns for col in required_cols):
+        st.warning("The mapping file is corrupted or from an older version. Resetting.")
+        df_mapping_all = pd.DataFrame()
+        df_mapping_level = pd.DataFrame()
+    else:
+        df_mapping_level = df_mapping_all[df_mapping_all['Level'] == level_num].copy()
+else:
+    df_mapping_all = pd.DataFrame()
+    df_mapping_level = pd.DataFrame()
+
+if not df_mapping_level.empty:
+    df_mapping = pd.merge(df_init, df_mapping_level, on=['System', 'Original WP'], how='left')
+else:
+    df_mapping = df_init.copy()
+    df_mapping['Common Name'] = ""
+    df_mapping['Complexity'] = 1.0
+    df_mapping['Comments'] = ""
+
+for col in ["Common Name", "Complexity", "Comments"]:
+    if col not in df_mapping.columns:
+        df_mapping[col] = "" if col != "Complexity" else 1.0
+    else:
+        if col == "Complexity":
+            df_mapping[col] = df_mapping[col].fillna(1.0)
+        else:
+            df_mapping[col] = df_mapping[col].fillna("")
+
+edited_mapping = st.data_editor(df_mapping[['System', 'Original WP', 'Common Name', 'Complexity', 'Comments']],
+                                hide_index=True, width='stretch', use_container_width=True)
+
+if not edited_mapping.equals(df_mapping[['System', 'Original WP', 'Common Name', 'Complexity', 'Comments']]):
+    edited_mapping['Level'] = level_num
+    if not df_mapping_all.empty:
+        df_mapping_all = df_mapping_all[df_mapping_all['Level'] != level_num]
+    else:
+        df_mapping_all = pd.DataFrame()
+    df_mapping_all = pd.concat([df_mapping_all, edited_mapping], ignore_index=True)
+    df_mapping_all.to_csv(MAPPING_FILE, index=False)
+    st.success(f"Mapping saved for level {level_num}")
+    st.rerun()
+
+map_dict = {(r["System"], r["Original WP"]): r["Common Name"] for _, r in edited_mapping.iterrows()}
+comp_dict = {(r["System"], r["Original WP"]): r["Complexity"] for _, r in edited_mapping.iterrows()}
+
+# ========== AGRÉGATION DES DONNÉES (UTILISÉ DANS TOUS LES ONGLETS) ==========
+all_rows = []
+for name, df in raw_dfs.items():
+    df['Date'] = pd.to_datetime(dates[name])
+    grouped = df.groupby([level_col, 'Date']).agg({
+        'Cout_Total': 'sum',
+        'Heures': 'sum',
+        'Taux_Horaire': 'mean',
+    }).reset_index()
+    grouped['System'] = name
+    grouped.rename(columns={level_col: 'Code'}, inplace=True)
+    all_rows.append(grouped)
+
+df_global = pd.concat(all_rows, ignore_index=True).sort_values('Date')
+
+# Ajouter le nom commun et la complexité
+df_global['Common_Name'] = df_global.apply(lambda row: map_dict.get((row['System'], row['Code']), row['Code']), axis=1)
+df_global['Complexity'] = df_global.apply(lambda row: comp_dict.get((row['System'], row['Code']), 1.0), axis=1)
+df_global['Normalized_Cost'] = df_global['Cout_Total'] / df_global['Complexity']
+
+# Créer des étiquettes uniques pour l'affichage
+df_global['Common_Name'] = df_global['Common_Name'].fillna('(empty)')
+name_counts = df_global.groupby('Common_Name')['Code'].nunique()
+def make_unique_label(row):
+    name = row['Common_Name']
+    if name_counts[name] > 1:
+        return f"{name} ({row['Code']})"
+    else:
+        return name
+df_global['Unique_Label'] = df_global.apply(make_unique_label, axis=1)
+df_global['Display_Name'] = df_global['Common_Name'].apply(lambda x: x[:30] + '...' if len(x) > 30 else x)
+
+# Stocker df_global dans session_state pour les autres onglets
+st.session_state.df_global = df_global
+st.session_state.level_choice = level_choice
+st.session_state.pivot_raw_code = df_global.pivot_table(index='Code', columns='System', values='Cout_Total', aggfunc='sum').fillna(0)
+st.session_state.pivot_norm_code = df_global.pivot_table(index='Code', columns='System', values='Normalized_Cost', aggfunc='sum').fillna(0)
+st.session_state.code_to_unique = df_global.groupby('Code')['Unique_Label'].first().to_dict()
+st.session_state.chrono_order = df_global[['System', 'Date']].drop_duplicates().sort_values('Date')['System'].tolist()
+st.session_state.wp_drift_dict = None
+st.session_state.decomposition_data = None
+
 # ========== ORGANISATION PAR ONGLETS ==========
 tabs = st.tabs([
     "1- configure data",
@@ -179,7 +291,6 @@ tabs = st.tabs([
 
 # --- ONGLET 1 : configure data ---
 with tabs[0]:
-    st.session_state.current_tab = 0
     st.divider()
 
     # Déterminer l'ordre chronologique des systèmes à partir des dates
@@ -206,7 +317,7 @@ with tabs[0]:
         x='Date',
         y='Cout_Total',
         markers=True,
-        title="Evolution of Total Raw Cost",
+        title="Evolution of Total Raw Cost (k€)",
         text='System'
     )
     fig_total.update_traces(textposition='top center')
@@ -222,8 +333,9 @@ with tabs[0]:
         y='Cout_Total',
         color='System',
         barmode='group',
-        title="Total Raw Costs by WBS Level 1 (all sub-WPs included)",
-        category_orders={"System": chrono_systems}
+        title="Total Raw Costs by WBS Level 1 (all sub-WPs included) (k€)",
+        category_orders={"System": chrono_systems},
+        labels={"Cout_Total": "Cost (k€)"}
     )
     fig_global.update_xaxes(tickangle=45)
     st.plotly_chart(fig_global, use_container_width=True)
@@ -231,163 +343,41 @@ with tabs[0]:
 
     st.divider()
 
-    # --- Suite de l'onglet (sélection du niveau, mapping, tableaux) ---
-    st.subheader("WBS Level Selection")
-    level_choice = st.selectbox(
-        "Select WBS level for analysis",
-        ["Level 1 (WBS_2)", "Level 2 (WBS_3)", "Level 3 (WBS_4)", "Level 4 (WBS_5)"],
-        index=3,
-        key="level_select"
-    )
-    # Stocker dans session_state pour les autres onglets
-    st.session_state.level_choice = level_choice
-
-    level_map = {
-        "Level 1 (WBS_2)": ("WBS_2", 1),
-        "Level 2 (WBS_3)": ("WBS_3", 2),
-        "Level 3 (WBS_4)": ("WBS_4", 3),
-        "Level 4 (WBS_5)": ("WBS_5", 4)
-    }
-    level_col, level_num = level_map[level_choice]
-
-    st.subheader("Technical Normalization Matrix")
-
-    # Construction de la liste des WP pour le niveau choisi
-    wp_list = []
-    for name, df in raw_dfs.items():
-        codes = df[level_col].unique()
-        for code in codes:
-            wp_list.append({"System": name, "Original WP": code})
-    df_init = pd.DataFrame(wp_list).drop_duplicates()
-
-    # Gestion du mapping
-    MAPPING_FILE = "mapping_hierarchique.csv"
-
-    if os.path.exists(MAPPING_FILE):
-        df_mapping_all = pd.read_csv(MAPPING_FILE)
-        required_cols = ['System', 'Original WP', 'Level']
-        if not all(col in df_mapping_all.columns for col in required_cols):
-            st.warning("The mapping file is corrupted or from an older version. Resetting.")
-            df_mapping_all = pd.DataFrame()
-            df_mapping_level = pd.DataFrame()
-        else:
-            df_mapping_level = df_mapping_all[df_mapping_all['Level'] == level_num].copy()
-    else:
-        df_mapping_all = pd.DataFrame()
-        df_mapping_level = pd.DataFrame()
-
-    if not df_mapping_level.empty:
-        df_mapping = pd.merge(df_init, df_mapping_level, on=['System', 'Original WP'], how='left')
-    else:
-        df_mapping = df_init.copy()
-        df_mapping['Common Name'] = ""
-        df_mapping['Complexity'] = 1.0
-        df_mapping['Comments'] = ""
-
-    for col in ["Common Name", "Complexity", "Comments"]:
-        if col not in df_mapping.columns:
-            df_mapping[col] = "" if col != "Complexity" else 1.0
-        else:
-            if col == "Complexity":
-                df_mapping[col] = df_mapping[col].fillna(1.0)
-            else:
-                df_mapping[col] = df_mapping[col].fillna("")
-
-    edited_mapping = st.data_editor(df_mapping[['System', 'Original WP', 'Common Name', 'Complexity', 'Comments']],
-                                    hide_index=True, width='stretch', use_container_width=True)
-
-    if not edited_mapping.equals(df_mapping[['System', 'Original WP', 'Common Name', 'Complexity', 'Comments']]):
-        edited_mapping['Level'] = level_num
-        if not df_mapping_all.empty:
-            df_mapping_all = df_mapping_all[df_mapping_all['Level'] != level_num]
-        else:
-            df_mapping_all = pd.DataFrame()
-        df_mapping_all = pd.concat([df_mapping_all, edited_mapping], ignore_index=True)
-        df_mapping_all.to_csv(MAPPING_FILE, index=False)
-        st.success(f"Mapping saved for level {level_num}")
-        st.rerun()
-
-    map_dict = {(r["System"], r["Original WP"]): r["Common Name"] for _, r in edited_mapping.iterrows()}
-    comp_dict = {(r["System"], r["Original WP"]): r["Complexity"] for _, r in edited_mapping.iterrows()}
-
-    # Agrégation des données par niveau
-    all_rows = []
-    for name, df in raw_dfs.items():
-        df['Date'] = pd.to_datetime(dates[name])
-        grouped = df.groupby([level_col, 'Date']).agg({
-            'Cout_Total': 'sum',
-            'Heures': 'sum',
-            'Taux_Horaire': 'mean',
-        }).reset_index()
-        grouped['System'] = name
-        grouped.rename(columns={level_col: 'Code'}, inplace=True)
-        all_rows.append(grouped)
-
-    df_global = pd.concat(all_rows, ignore_index=True).sort_values('Date')
-
-    # Ajouter le nom commun et la complexité
-    df_global['Common_Name'] = df_global.apply(lambda row: map_dict.get((row['System'], row['Code']), row['Code']), axis=1)
-    df_global['Complexity'] = df_global.apply(lambda row: comp_dict.get((row['System'], row['Code']), 1.0), axis=1)
-    df_global['Normalized_Cost'] = df_global['Cout_Total'] / df_global['Complexity']
-
-    # Créer des étiquettes uniques pour l'affichage
-    df_global['Common_Name'] = df_global['Common_Name'].fillna('(empty)')
-    name_counts = df_global.groupby('Common_Name')['Code'].nunique()
-    def make_unique_label(row):
-        name = row['Common_Name']
-        if name_counts[name] > 1:
-            return f"{name} ({row['Code']})"
-        else:
-            return name
-    df_global['Unique_Label'] = df_global.apply(make_unique_label, axis=1)
-    df_global['Display_Name'] = df_global['Common_Name'].apply(lambda x: x[:30] + '...' if len(x) > 30 else x)
-
     # --- TABLEAUX RÉCAPITULATIFS ---
-    st.divider()
     st.subheader("Aggregated Data per Work Package")
 
-    def create_summary_table(value_col):
+    def create_summary_table(value_col, unit_label):
         pivot = df_global.pivot_table(index='Code', columns='System', values=value_col, aggfunc='sum').fillna(0)
         names = df_global.groupby('Code')['Common_Name'].first()
         pivot = pivot.join(names)
         cols = ['Common_Name'] + [c for c in pivot.columns if c != 'Common_Name']
         pivot = pivot[cols]
         pivot.index.name = 'Code'
-        return pivot
+        return pivot, cols[1:]  # retourne aussi les colonnes numériques
 
-    st.write("**Raw Costs (k€)**")
-    raw_table = create_summary_table('Cout_Total')
-    num_cols = [c for c in raw_table.columns if c != 'Common_Name']
-    styled_raw = raw_table.style.format("{:.2f}", subset=num_cols)
+    st.write("**Raw Costs**")
+    raw_table, num_cols_raw = create_summary_table('Cout_Total', "k€")
+    styled_raw = raw_table.style.format("{:.2f} k€", subset=num_cols_raw)
     st.dataframe(styled_raw, use_container_width=True)
 
-    st.write("**Normalized Costs (k€)**")
-    norm_table = create_summary_table('Normalized_Cost')
-    styled_norm = norm_table.style.format("{:.2f}", subset=num_cols)
+    st.write("**Normalized Costs**")
+    norm_table, num_cols_norm = create_summary_table('Normalized_Cost', "k€")
+    styled_norm = norm_table.style.format("{:.2f} k€", subset=num_cols_norm)
     st.dataframe(styled_norm, use_container_width=True)
 
     if df_global['Heures'].sum() > 0:
         st.write("**Hours**")
-        hours_table = create_summary_table('Heures')
-        styled_hours = hours_table.style.format("{:.0f}", subset=num_cols)
+        hours_table, num_cols_hours = create_summary_table('Heures', "h")
+        styled_hours = hours_table.style.format("{:.0f} h", subset=num_cols_hours)
         st.dataframe(styled_hours, use_container_width=True)
 
     if df_global['Taux_Horaire'].notna().any():
-        st.write("**Average Hourly Rates (€/h)**")
-        rates_table = create_summary_table('Taux_Horaire')
-        styled_rates = rates_table.style.format("{:.2f}", subset=num_cols)
+        st.write("**Average Hourly Rates**")
+        rates_table, num_cols_rates = create_summary_table('Taux_Horaire', "€/h")
+        styled_rates = rates_table.style.format("{:.2f} €/h", subset=num_cols_rates)
         st.dataframe(styled_rates, use_container_width=True)
 
-    # Stocker df_global dans session_state pour les autres onglets
-    st.session_state.df_global = df_global
-    st.session_state.pivot_raw_code = df_global.pivot_table(index='Code', columns='System', values='Cout_Total', aggfunc='sum').fillna(0)
-    st.session_state.pivot_norm_code = df_global.pivot_table(index='Code', columns='System', values='Normalized_Cost', aggfunc='sum').fillna(0)
-    st.session_state.code_to_unique = df_global.groupby('Code')['Unique_Label'].first().to_dict()
-    st.session_state.chrono_order = df_global[['System', 'Date']].drop_duplicates().sort_values('Date')['System'].tolist()
-    st.session_state.wp_drift_dict = None
-    st.session_state.decomposition_data = None
-
-def draw_bridge(pivot_df, base_sys, target_sys):
+def draw_bridge(pivot_df, base_sys, target_sys, unit="k€"):
     if base_sys not in pivot_df.columns or target_sys not in pivot_df.columns:
         return go.Figure()
     v_base = pivot_df[base_sys].sum()
@@ -403,12 +393,19 @@ def draw_bridge(pivot_df, base_sys, target_sys):
     labels.append(f"Total {target_sys}")
     values.append(pivot_df[target_sys].sum())
     measures.append("total")
-    return go.Figure(go.Waterfall(measure=measures, x=labels, y=values)).update_layout(title=f"Bridge: {base_sys} → {target_sys}")
+    
+    fig = go.Figure(go.Waterfall(
+        measure=measures,
+        x=labels,
+        y=values,
+        text=[f"{v:.2f} {unit}" for v in values],
+        textposition="outside"
+    ))
+    fig.update_layout(title=f"Bridge: {base_sys} → {target_sys} ({unit})")
+    return fig
 
 # --- ONGLET 2 : graph analysis ---
 with tabs[1]:
-    # On met à jour current_tab à chaque fois qu'on entre dans l'onglet
-    st.session_state.current_tab = 1
     st.divider()
 
     if 'df_global' not in st.session_state:
@@ -467,22 +464,30 @@ with tabs[1]:
 
         st.subheader("Raw Data")
         if not df_filtered.empty:
-            fig_raw_bar = px.bar(df_filtered, x="Unique_Label", y="Cout_Total", color="System", barmode="group", title="Raw Volume")
+            fig_raw_bar = px.bar(df_filtered, x="Unique_Label", y="Cout_Total", color="System", 
+                                 barmode="group", title="Raw Volume (k€)",
+                                 labels={"Cout_Total": "Cost (k€)"})
             fig_raw_bar.update_xaxes(tickangle=45)
             st.plotly_chart(fig_raw_bar, use_container_width=True, key="raw_vol")
 
-            fig_raw_line = px.line(df_filtered, x="Date", y="Cout_Total", color="Unique_Label", markers=True, title="Raw Timeline")
+            fig_raw_line = px.line(df_filtered, x="Date", y="Cout_Total", color="Unique_Label", 
+                                   markers=True, title="Raw Timeline (k€)",
+                                   labels={"Cout_Total": "Cost (k€)"})
             st.plotly_chart(fig_raw_line, use_container_width=True, key="raw_time")
         else:
             st.info("No data for selected Work Packages.")
 
         st.subheader("Normalized Data")
         if not df_filtered.empty:
-            fig_norm_bar = px.bar(df_filtered, x="Unique_Label", y="Normalized_Cost", color="System", barmode="group", title="Normalized Volume")
+            fig_norm_bar = px.bar(df_filtered, x="Unique_Label", y="Normalized_Cost", color="System", 
+                                  barmode="group", title="Normalized Volume (k€)",
+                                  labels={"Normalized_Cost": "Normalized Cost (k€)"})
             fig_norm_bar.update_xaxes(tickangle=45)
             st.plotly_chart(fig_norm_bar, use_container_width=True, key="norm_vol")
 
-            fig_norm_line = px.line(df_filtered, x="Date", y="Normalized_Cost", color="Unique_Label", markers=True, title="Normalized Timeline")
+            fig_norm_line = px.line(df_filtered, x="Date", y="Normalized_Cost", color="Unique_Label", 
+                                    markers=True, title="Normalized Timeline (k€)",
+                                    labels={"Normalized_Cost": "Normalized Cost (k€)"})
             st.plotly_chart(fig_norm_line, use_container_width=True, key="norm_time")
         else:
             st.info("No data for selected Work Packages.")
@@ -497,7 +502,7 @@ with tabs[1]:
         with col_b:
             target_r = st.selectbox("Target (Raw)", [s for s in files_list if s != base_r], index=0, key="target_raw")
         if base_r != target_r:
-            st.plotly_chart(draw_bridge(pivot_raw_unique, base_r, target_r), use_container_width=True, key="raw_bridge")
+            st.plotly_chart(draw_bridge(pivot_raw_unique, base_r, target_r, "k€"), use_container_width=True, key="raw_bridge")
         else:
             st.warning("Choose two different systems")
 
@@ -509,13 +514,12 @@ with tabs[1]:
         with col_d:
             target_n = st.selectbox("Target (Normalized)", [s for s in files_list if s != base_n], index=0, key="target_norm")
         if base_n != target_n:
-            st.plotly_chart(draw_bridge(pivot_norm_unique, base_n, target_n), use_container_width=True, key="norm_bridge")
+            st.plotly_chart(draw_bridge(pivot_norm_unique, base_n, target_n, "k€"), use_container_width=True, key="norm_bridge")
         else:
             st.warning("Choose two different systems")
 
 # --- ONGLET 3 : Drift analysis ---
 with tabs[2]:
-    st.session_state.current_tab = 2
     st.divider()
     if 'df_global' not in st.session_state:
         st.warning("Please configure the level and mapping in the first tab first.")
@@ -540,15 +544,18 @@ with tabs[2]:
                 st.warning("Could not compute global drift (SVD error).")
             slope_month = slope_day * 30.44
             fig = go.Figure()
-            fig.add_trace(go.Scatter(x=total_norm['Date'], y=total_norm['Normalized_Cost'], mode='markers+lines', name='Total'))
+            fig.add_trace(go.Scatter(x=total_norm['Date'], y=total_norm['Normalized_Cost'], 
+                                     mode='markers+lines', name='Total',
+                                     text=[f"{v:.2f} k€" for v in total_norm['Normalized_Cost']]))
             fig.add_trace(go.Scatter(x=[total_norm['Date'].min(), total_norm['Date'].max()], 
                                      y=np.polyval([slope_day, coeffs[1] if 'coeffs' in locals() else 0], [0, x.max()]), 
                                      mode='lines', line=dict(dash='dash', color='red'), name='Trend'))
-            fig.update_layout(title="Total Normalized Cost Over Time", xaxis_title="Date", yaxis_title="€")
+            fig.update_layout(title="Total Normalized Cost Over Time (k€)", 
+                             xaxis_title="Date", yaxis_title="Cost (k€)")
             st.plotly_chart(fig, use_container_width=True, key="global_drift")
             col1, col2, col3 = st.columns(3)
-            col1.metric("Daily drift", f"{slope_day:+.2f} €/day")
-            col2.metric("Monthly drift", f"{slope_month:+.2f} €/month")
+            col1.metric("Daily drift", f"{slope_day:+.2f} k€/day")
+            col2.metric("Monthly drift", f"{slope_month:+.2f} k€/month")
             col3.metric("Annualized drift", f"{annual_pct:+.1f} %/year")
         else:
             st.warning("Not enough points for global drift")
@@ -603,7 +610,9 @@ with tabs[2]:
                 sub = wp_drift_dict[selected_code]['data']
                 display_name = wp_drift_dict[selected_code]['display']
                 if not sub.empty:
-                    fig = px.line(sub, x='Date', y='Normalized_Cost', text='System', markers=True, title=f"{display_name} normalized cost")
+                    fig = px.line(sub, x='Date', y='Normalized_Cost', text='System', markers=True, 
+                                 title=f"{display_name} normalized cost (k€)",
+                                 labels={"Normalized_Cost": "Cost (k€)"})
                     fig.update_traces(textposition='top center')
                     st.plotly_chart(fig, use_container_width=True, key="wp_detail")
                 else:
@@ -611,7 +620,6 @@ with tabs[2]:
 
 # --- ONGLET 4 : competitiveness deep dive ---
 with tabs[3]:
-    st.session_state.current_tab = 3
     st.divider()
     if 'df_global' not in st.session_state:
         st.warning("Please configure the level and mapping in the first tab first.")
@@ -664,10 +672,20 @@ with tabs[3]:
                     st.dataframe(df_display, use_container_width=True, hide_index=True)
                     df_plot = pd.DataFrame(decomposition_data)
                     fig = go.Figure()
-                    fig.add_trace(go.Bar(name='Rate share', x=df_plot['WP'], y=[float(s.replace('%','').replace('+','')) for s in df_plot['Rate share']], marker_color='lightblue'))
-                    fig.add_trace(go.Bar(name='Hours share', x=df_plot['WP'], y=[float(s.replace('%','').replace('+','')) for s in df_plot['Hours share']], marker_color='lightcoral'))
-                    fig.add_trace(go.Bar(name='Cross share', x=df_plot['WP'], y=[float(s.replace('%','').replace('+','')) for s in df_plot['Cross share']], marker_color='lightgreen'))
-                    fig.update_layout(barmode='stack', title="Contribution shares to total cost variation", yaxis_title="% of total variation")
+                    fig.add_trace(go.Bar(name='Rate share', x=df_plot['WP'], 
+                                        y=[float(s.replace('%','').replace('+','')) for s in df_plot['Rate share']], 
+                                        marker_color='lightblue', text=[s for s in df_plot['Rate share']]))
+                    fig.add_trace(go.Bar(name='Hours share', x=df_plot['WP'], 
+                                        y=[float(s.replace('%','').replace('+','')) for s in df_plot['Hours share']], 
+                                        marker_color='lightcoral', text=[s for s in df_plot['Hours share']]))
+                    fig.add_trace(go.Bar(name='Cross share', x=df_plot['WP'], 
+                                        y=[float(s.replace('%','').replace('+','')) for s in df_plot['Cross share']], 
+                                        marker_color='lightgreen', text=[s for s in df_plot['Cross share']]))
+                    fig.update_layout(barmode='stack', 
+                                     title="Contribution shares to total cost variation",
+                                     yaxis_title="% of total variation",
+                                     xaxis_title="Work Package")
+                    fig.update_traces(textposition='inside')
                     st.plotly_chart(fig, use_container_width=True, key="compet_chart")
                 else:
                     st.info("Not enough data for decomposition (no WP with varying hours/rates).")
@@ -678,7 +696,6 @@ with tabs[3]:
 
 # --- ONGLET 5 : IA Analysis ---
 with tabs[4]:
-    st.session_state.current_tab = 4
     st.divider()
     if 'df_global' not in st.session_state:
         st.warning("Please configure the level and mapping in the first tab first.")
@@ -711,7 +728,7 @@ with tabs[4]:
                     slope_day = coeffs[0]
                     first_cost = y[0]
                     annual_pct = (slope_day * 365 / first_cost) * 100 if first_cost else 0
-                    global_trend = f"global slope = {slope_day:.2f} €/day, i.e. {annual_pct:.1f}% per year (initial total cost = {first_cost:.2f} €)"
+                    global_trend = f"global slope = {slope_day:.2f} k€/day, i.e. {annual_pct:.1f}% per year (initial total cost = {first_cost:.2f} k€)"
                 except np.linalg.LinAlgError:
                     global_trend = "Global trend not available (SVD error)"
             else:
@@ -731,7 +748,7 @@ with tabs[4]:
                     decomp_summary += f"- {d['WP']}: Total Δ = {d['Total Δ%']}, Rate share = {d['Rate share']}, Hours share = {d['Hours share']} → {d['Interpretation']}\n"
 
             prompt = f"""
-You are an expert in aerospace project analysis. We have calculated normalized cost drifts for three versions (Alpha, Beta, Gamma) with their actual dates.
+You are an expert in aerospace project analysis. We have calculated normalized cost drifts for three versions (Alpha, Beta, Gamma) with their actual dates. All costs are in k€ (thousands of euros).
 
 **Global trend**:
 {global_trend}
@@ -770,7 +787,7 @@ Answer concisely.
             if st.button("🧠 Full Strategic Audit", key="btn_audit"):
                 pivot_norm_unique = pivot_norm_code.rename(index=code_to_unique)
                 summary = f"""
-ACTUAL PROJECT DATA:
+ACTUAL PROJECT DATA (all costs in k€):
 - Chronological order: {' -> '.join(chrono_order)}
 - Dates: { {k: v.strftime('%Y-%m-%d') for k,v in dates.items()} }
 - Analysis level: {st.session_state.level_choice}
@@ -778,7 +795,7 @@ ACTUAL PROJECT DATA:
 {pivot_norm_unique.to_string()}
 """
                 prompt_full = f"""
-Act as a Senior Airbus Project Controller. Analyze the cost drift based on the real data below.
+Act as a Senior Airbus Project Controller. Analyze the cost drift based on the real data below. All costs are in k€ (thousands of euros).
 {summary}
 Provide a concise audit covering:
 1. Key Work Packages with significant cost variations.
@@ -804,9 +821,6 @@ Provide a concise audit covering:
 
 # --- ONGLET 6 : Validation ---
 with tabs[5]:
-    # Pour la validation, on peut choisir de garder le dernier onglet actif
-    # ou de ne pas modifier current_tab pour laisser la progression inchangée
-    # Ici on garde le dernier onglet actif (5) pour ne pas affecter la progression
     st.divider()
     st.sidebar.header("🧪 Validation Mode")
     oracle_file = st.sidebar.file_uploader("Load oracle file", type=["xlsx", "csv"], key="oracle_upload")
@@ -815,55 +829,16 @@ with tabs[5]:
     else:
         st.info("Load an oracle file to validate results.")
 
-# ========== MISE À JOUR DE LA PROGRESSION DANS LA SIDEBAR ==========
-# Calcul de la progression basée sur l'onglet courant (max 5 étapes)
-# On s'assure que current_tab est entre 0 et 4 pour les 5 premiers onglets
-if st.session_state.current_tab > 4:
-    # Si on est dans l'onglet Validation (index 5), on garde la progression à 100%
-    current_step = 5
-else:
-    current_step = st.session_state.current_tab + 1
-
-progress_pct = (current_step / 5) * 100
-
-progress_bar_placeholder.progress(progress_pct / 100, text=f"Overall progress: {int(progress_pct)}%")
-
-# Affichage des étapes
-step_status = []
-for i in range(5):
-    if i < st.session_state.current_tab:
-        step_status.append("✅")
-    elif i == st.session_state.current_tab:
-        step_status.append("👉")
-    else:
-        step_status.append("⬜")
-
-# Si on est dans l'onglet Validation, on garde les statuts précédents
-if st.session_state.current_tab > 4:
-    # On ne change pas l'affichage, on garde celui du dernier onglet actif
-    pass
-
-step_labels = [
-    "1. configure data",
-    "2. graph analysis",
-    "3. Drift analysis",
-    "4. competitiveness deep dive",
-    "5. IA Analysis"
-]
-
-steps_text = ""
-for i in range(5):
-    steps_text += f"{step_status[i]} **{step_labels[i]}**\n\n"
-steps_placeholder.markdown(steps_text)
-
 # --- GUIDE ---
 st.divider()
 st.subheader("📚 Audit Guide")
 st.markdown("""
-* **configure data**: Choose WBS level, view a global overview of Level 1 costs, edit mapping, and view aggregated data per Work Package.
+* **configure data**: View global overview of Level 1 costs. The mapping matrix above affects all tabs.
 * **graph analysis**: Raw and normalized cost views, with bridge charts. Select WPs via checkboxes (Select All/Clear All).
-* **Drift analysis**: Global trend and per-WP annualized drift (calculated across all systems). No system column, just the Work Package.
+* **Drift analysis**: Global trend and per-WP annualized drift (calculated across all systems).
 * **competitiveness deep dive**: Decomposition of cost variations into rate (inflation) and hours (technical) effects.
 * **IA Analysis**: AI commentary on drifts.
 * **Validation**: Compare against an oracle file.
+
+**Note**: All costs are displayed in k€ (thousands of euros). Hours are in hours, rates in €/h.
 """)
