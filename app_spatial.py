@@ -283,9 +283,10 @@ st.session_state.decomposition_data = None
 tabs = st.tabs([
     "1- overall analysis",
     "2- WP analysis",
-    "3- Drift analysis",
-    "4- competitiveness deep dive",
-    "5- IA Analysis",
+    "3- Bridges",
+    "4- Drift analysis",
+    "5- competitiveness deep dive",
+    "6- IA Analysis",
     "✅ Validation"
 ])
 
@@ -318,11 +319,11 @@ with tabs[0]:
         x='Date',
         y='Cout_Total',
         markers=True,
-        title="Evolution of Total Raw Cost (k€)",
+        title="Evolution of Total Raw Cost",
         text='System'
     )
     fig_total.update_traces(textposition='top center')
-    fig_total.update_layout(xaxis_title="Date", yaxis_title="Total Cost (k€)")
+    fig_total.update_layout(xaxis_title="Date", yaxis_title="Cost (k€)")
     st.plotly_chart(fig_total, use_container_width=True)
 
     st.divider()
@@ -335,7 +336,7 @@ with tabs[0]:
         y='Cout_Total',
         color='System',
         barmode='group',
-        title=f"Total Raw Costs by {level_choice} (all sub-WPs included) (k€)",
+        title=f"Total Raw Costs by {level_choice} (all sub-WPs included)",
         category_orders={"System": chrono_systems},
         labels={"Cout_Total": "Cost (k€)", level_col: "WBS Code"}
     )
@@ -379,7 +380,7 @@ with tabs[0]:
         styled_rates = rates_table.style.format("{:.2f} €/h", subset=num_cols_rates)
         st.dataframe(styled_rates, use_container_width=True)
 
-def draw_bridge(pivot_df, base_sys, target_sys, unit="k€"):
+def draw_bridge(pivot_df, base_sys, target_sys, title_prefix=""):
     if base_sys not in pivot_df.columns or target_sys not in pivot_df.columns:
         return go.Figure()
     v_base = pivot_df[base_sys].sum()
@@ -400,10 +401,13 @@ def draw_bridge(pivot_df, base_sys, target_sys, unit="k€"):
         measure=measures,
         x=labels,
         y=values,
-        text=[f"{v:.2f} {unit}" for v in values],
+        text=[f"{v:.1f}" for v in values],
         textposition="outside"
     ))
-    fig.update_layout(title=f"Bridge: {base_sys} → {target_sys} ({unit})")
+    fig.update_layout(
+        title=f"{title_prefix}Bridge: {base_sys} → {target_sys}",
+        yaxis_title="Cost (k€)"
+    )
     return fig
 
 # --- ONGLET 2 : WP analysis (analyse détaillée par work package) ---
@@ -414,9 +418,6 @@ with tabs[1]:
         st.warning("Please configure the level and mapping in the first tab first.")
     else:
         df_global = st.session_state.df_global
-        pivot_raw_code = st.session_state.pivot_raw_code
-        pivot_norm_code = st.session_state.pivot_norm_code
-        code_to_unique = st.session_state.code_to_unique
         files_list = ["Devis_Alpha", "Devis_Beta", "Devis_Gamma"]
 
         unique_labels = df_global['Unique_Label'].dropna().unique().tolist()
@@ -467,14 +468,14 @@ with tabs[1]:
         st.subheader("Raw Data")
         if not df_filtered.empty:
             fig_raw_bar = px.bar(df_filtered, x="Unique_Label", y="Cout_Total", color="System", 
-                                 barmode="group", title="Raw Volume (k€)",
-                                 labels={"Cout_Total": "Cost (k€)"})
+                                 barmode="group", title="Raw Volume",
+                                 labels={"Cout_Total": "Cost (k€)", "Unique_Label": "Work Package"})
             fig_raw_bar.update_xaxes(tickangle=45)
             st.plotly_chart(fig_raw_bar, use_container_width=True, key="raw_vol")
 
             fig_raw_line = px.line(df_filtered, x="Date", y="Cout_Total", color="Unique_Label", 
-                                   markers=True, title="Raw Timeline (k€)",
-                                   labels={"Cout_Total": "Cost (k€)"})
+                                   markers=True, title="Raw Timeline",
+                                   labels={"Cout_Total": "Cost (k€)", "Date": "Date"})
             st.plotly_chart(fig_raw_line, use_container_width=True, key="raw_time")
         else:
             st.info("No data for selected Work Packages.")
@@ -482,46 +483,64 @@ with tabs[1]:
         st.subheader("Normalized Data")
         if not df_filtered.empty:
             fig_norm_bar = px.bar(df_filtered, x="Unique_Label", y="Normalized_Cost", color="System", 
-                                  barmode="group", title="Normalized Volume (k€)",
-                                  labels={"Normalized_Cost": "Normalized Cost (k€)"})
+                                  barmode="group", title="Normalized Volume",
+                                  labels={"Normalized_Cost": "Normalized Cost (k€)", "Unique_Label": "Work Package"})
             fig_norm_bar.update_xaxes(tickangle=45)
             st.plotly_chart(fig_norm_bar, use_container_width=True, key="norm_vol")
 
             fig_norm_line = px.line(df_filtered, x="Date", y="Normalized_Cost", color="Unique_Label", 
-                                    markers=True, title="Normalized Timeline (k€)",
-                                    labels={"Normalized_Cost": "Normalized Cost (k€)"})
+                                    markers=True, title="Normalized Timeline",
+                                    labels={"Normalized_Cost": "Normalized Cost (k€)", "Date": "Date"})
             st.plotly_chart(fig_norm_line, use_container_width=True, key="norm_time")
         else:
             st.info("No data for selected Work Packages.")
 
-        # Bridges
-        st.subheader("Bridges")
-        st.markdown("**Raw Bridge**")
-        pivot_raw_unique = pivot_raw_code.rename(index=code_to_unique)
-        col_a, col_b = st.columns(2)
-        with col_a:
-            base_r = st.selectbox("Base (Raw)", files_list, index=0, key="base_raw")
-        with col_b:
-            target_r = st.selectbox("Target (Raw)", [s for s in files_list if s != base_r], index=0, key="target_raw")
-        if base_r != target_r:
-            st.plotly_chart(draw_bridge(pivot_raw_unique, base_r, target_r, "k€"), use_container_width=True, key="raw_bridge")
-        else:
-            st.warning("Choose two different systems")
-
-        st.markdown("**Normalized Bridge**")
-        pivot_norm_unique = pivot_norm_code.rename(index=code_to_unique)
-        col_c, col_d = st.columns(2)
-        with col_c:
-            base_n = st.selectbox("Base (Normalized)", files_list, index=0, key="base_norm")
-        with col_d:
-            target_n = st.selectbox("Target (Normalized)", [s for s in files_list if s != base_n], index=0, key="target_norm")
-        if base_n != target_n:
-            st.plotly_chart(draw_bridge(pivot_norm_unique, base_n, target_n, "k€"), use_container_width=True, key="norm_bridge")
-        else:
-            st.warning("Choose two different systems")
-
-# --- ONGLET 3 : Drift analysis ---
+# --- ONGLET 3 : Bridges ---
 with tabs[2]:
+    st.divider()
+
+    if 'df_global' not in st.session_state:
+        st.warning("Please configure the level and mapping in the first tab first.")
+    else:
+        pivot_raw_code = st.session_state.pivot_raw_code
+        pivot_norm_code = st.session_state.pivot_norm_code
+        code_to_unique = st.session_state.code_to_unique
+        files_list = ["Devis_Alpha", "Devis_Beta", "Devis_Gamma"]
+
+        st.subheader("Bridge Charts - Cost Decomposition Between Bids")
+        st.markdown("""
+        Bridge charts show the step-by-step contribution of each Work Package to the total cost difference between two bids.
+        Positive values (above zero) increase the total cost, negative values decrease it.
+        """)
+
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            st.markdown("**Raw Cost Bridge**")
+            pivot_raw_unique = pivot_raw_code.rename(index=code_to_unique)
+            base_r = st.selectbox("Base bid (Raw)", files_list, index=0, key="base_raw")
+            target_options = [s for s in files_list if s != base_r]
+            target_r = st.selectbox("Target bid (Raw)", target_options, index=0, key="target_raw")
+            if base_r != target_r:
+                st.plotly_chart(draw_bridge(pivot_raw_unique, base_r, target_r, "Raw "), use_container_width=True, key="raw_bridge")
+            else:
+                st.warning("Choose two different systems")
+
+        with col2:
+            st.markdown("**Normalized Cost Bridge**")
+            pivot_norm_unique = pivot_norm_code.rename(index=code_to_unique)
+            base_n = st.selectbox("Base bid (Normalized)", files_list, index=0, key="base_norm")
+            target_options_n = [s for s in files_list if s != base_n]
+            target_n = st.selectbox("Target bid (Normalized)", target_options_n, index=0, key="target_norm")
+            if base_n != target_n:
+                st.plotly_chart(draw_bridge(pivot_norm_unique, base_n, target_n, "Normalized "), use_container_width=True, key="norm_bridge")
+            else:
+                st.warning("Choose two different systems")
+
+        st.info("💡 **Interpretation**: The chart starts with the total cost of the base bid. Each bar shows how much a specific Work Package adds or subtracts to reach the target bid total.")
+
+# --- ONGLET 4 : Drift analysis ---
+with tabs[3]:
     st.divider()
     if 'df_global' not in st.session_state:
         st.warning("Please configure the level and mapping in the first tab first.")
@@ -548,11 +567,11 @@ with tabs[2]:
             fig = go.Figure()
             fig.add_trace(go.Scatter(x=total_norm['Date'], y=total_norm['Normalized_Cost'], 
                                      mode='markers+lines', name='Total',
-                                     text=[f"{v:.2f} k€" for v in total_norm['Normalized_Cost']]))
+                                     text=[f"{v:.1f}" for v in total_norm['Normalized_Cost']]))
             fig.add_trace(go.Scatter(x=[total_norm['Date'].min(), total_norm['Date'].max()], 
                                      y=np.polyval([slope_day, coeffs[1] if 'coeffs' in locals() else 0], [0, x.max()]), 
                                      mode='lines', line=dict(dash='dash', color='red'), name='Trend'))
-            fig.update_layout(title="Total Normalized Cost Over Time (k€)", 
+            fig.update_layout(title="Total Normalized Cost Over Time", 
                              xaxis_title="Date", yaxis_title="Cost (k€)")
             st.plotly_chart(fig, use_container_width=True, key="global_drift")
             col1, col2, col3 = st.columns(3)
@@ -613,15 +632,15 @@ with tabs[2]:
                 display_name = wp_drift_dict[selected_code]['display']
                 if not sub.empty:
                     fig = px.line(sub, x='Date', y='Normalized_Cost', text='System', markers=True, 
-                                 title=f"{display_name} normalized cost (k€)",
-                                 labels={"Normalized_Cost": "Cost (k€)"})
+                                 title=f"{display_name} normalized cost",
+                                 labels={"Normalized_Cost": "Cost (k€)", "Date": "Date"})
                     fig.update_traces(textposition='top center')
                     st.plotly_chart(fig, use_container_width=True, key="wp_detail")
                 else:
                     st.warning("No data for this Work Package.")
 
-# --- ONGLET 4 : competitiveness deep dive ---
-with tabs[3]:
+# --- ONGLET 5 : competitiveness deep dive ---
+with tabs[4]:
     st.divider()
     if 'df_global' not in st.session_state:
         st.warning("Please configure the level and mapping in the first tab first.")
@@ -696,8 +715,8 @@ with tabs[3]:
         else:
             st.info("Hourly rate data not available.")
 
-# --- ONGLET 5 : IA Analysis ---
-with tabs[4]:
+# --- ONGLET 6 : IA Analysis ---
+with tabs[5]:
     st.divider()
     if 'df_global' not in st.session_state:
         st.warning("Please configure the level and mapping in the first tab first.")
@@ -821,8 +840,8 @@ Provide a concise audit covering:
             if 'ai_audit' in st.session_state:
                 st.info(st.session_state.ai_audit)
 
-# --- ONGLET 6 : Validation ---
-with tabs[5]:
+# --- ONGLET 7 : Validation ---
+with tabs[6]:
     st.divider()
     st.sidebar.header("🧪 Validation Mode")
     oracle_file = st.sidebar.file_uploader("Load oracle file", type=["xlsx", "csv"], key="oracle_upload")
@@ -836,11 +855,12 @@ st.divider()
 st.subheader("📚 Audit Guide")
 st.markdown("""
 * **overall analysis**: View global overview at the selected WBS level. The mapping matrix above affects all tabs.
-* **WP analysis**: Raw and normalized cost views per Work Package, with bridge charts. Select WPs via checkboxes (Select All/Clear All).
+* **WP analysis**: Raw and normalized cost views per Work Package. Select WPs via checkboxes (Select All/Clear All).
+* **Bridges**: Visual decomposition of cost differences between any two bids.
 * **Drift analysis**: Global trend and per-WP annualized drift (calculated across all systems).
 * **competitiveness deep dive**: Decomposition of cost variations into rate (inflation) and hours (technical) effects.
 * **IA Analysis**: AI commentary on drifts.
 * **Validation**: Compare against an oracle file.
 
-**Note**: All costs are displayed in k€ (thousands of euros). Hours are in hours, rates in €/h.
+**Note**: All costs are displayed in k€ (thousands of euros). The numbers on the axes represent thousands of euros. Hours are in hours, rates in €/h.
 """)
