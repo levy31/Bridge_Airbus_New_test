@@ -407,6 +407,7 @@ def draw_bridge(pivot_df, base_sys, target_sys):
 
 # --- ONGLET 2 : graph analysis ---
 with tabs[1]:
+    # On met à jour current_tab à chaque fois qu'on entre dans l'onglet
     st.session_state.current_tab = 1
     st.divider()
 
@@ -803,7 +804,9 @@ Provide a concise audit covering:
 
 # --- ONGLET 6 : Validation ---
 with tabs[5]:
-    # NE PAS MODIFIER current_tab POUR GARDER LA PROGRESSION
+    # Pour la validation, on peut choisir de garder le dernier onglet actif
+    # ou de ne pas modifier current_tab pour laisser la progression inchangée
+    # Ici on garde le dernier onglet actif (5) pour ne pas affecter la progression
     st.divider()
     st.sidebar.header("🧪 Validation Mode")
     oracle_file = st.sidebar.file_uploader("Load oracle file", type=["xlsx", "csv"], key="oracle_upload")
@@ -814,7 +817,13 @@ with tabs[5]:
 
 # ========== MISE À JOUR DE LA PROGRESSION DANS LA SIDEBAR ==========
 # Calcul de la progression basée sur l'onglet courant (max 5 étapes)
-current_step = st.session_state.current_tab + 1
+# On s'assure que current_tab est entre 0 et 4 pour les 5 premiers onglets
+if st.session_state.current_tab > 4:
+    # Si on est dans l'onglet Validation (index 5), on garde la progression à 100%
+    current_step = 5
+else:
+    current_step = st.session_state.current_tab + 1
+
 progress_pct = (current_step / 5) * 100
 
 progress_bar_placeholder.progress(progress_pct / 100, text=f"Overall progress: {int(progress_pct)}%")
@@ -828,6 +837,11 @@ for i in range(5):
         step_status.append("👉")
     else:
         step_status.append("⬜")
+
+# Si on est dans l'onglet Validation, on garde les statuts précédents
+if st.session_state.current_tab > 4:
+    # On ne change pas l'affichage, on garde celui du dernier onglet actif
+    pass
 
 step_labels = [
     "1. configure data",
