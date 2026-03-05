@@ -281,34 +281,35 @@ st.session_state.decomposition_data = None
 
 # ========== ORGANISATION PAR ONGLETS ==========
 tabs = st.tabs([
-    "1- configure data",
-    "2- graph analysis",
+    "1- overall analysis",
+    "2- WP analysis",
     "3- Drift analysis",
     "4- competitiveness deep dive",
     "5- IA Analysis",
     "✅ Validation"
 ])
 
-# --- ONGLET 1 : configure data ---
+# --- ONGLET 1 : overall analysis (utilise le niveau WBS sélectionné) ---
 with tabs[0]:
     st.divider()
 
     # Déterminer l'ordre chronologique des systèmes à partir des dates
-    chrono_systems = sorted(dates.keys(), key=lambda x: dates[x])  # ['Devis_Gamma', 'Devis_Beta', 'Devis_Alpha']
+    chrono_systems = sorted(dates.keys(), key=lambda x: dates[x])
 
-    # Calculer les totaux par WBS_2 et par système pour le graphique à barres
-    global_view_data = []
+    # Calculer les totaux par niveau sélectionné et par système
+    overall_view_data = []
     for name, df in raw_dfs.items():
         df_sys = df.copy()
         df_sys['System'] = name
-        grouped = df_sys.groupby('WBS_2').agg({'Cout_Total': 'sum'}).reset_index()
+        # Utiliser la colonne WBS du niveau sélectionné
+        grouped = df_sys.groupby(level_col).agg({'Cout_Total': 'sum'}).reset_index()
         grouped['System'] = name
-        global_view_data.append(grouped)
-    df_global_view = pd.concat(global_view_data, ignore_index=True)
+        overall_view_data.append(grouped)
+    df_overall_view = pd.concat(overall_view_data, ignore_index=True)
 
-    # --- GRAPHIQUE LINÉAIRE (Total Global Cost per Bid) en premier ---
+    # --- GRAPHIQUE LINÉAIRE (Total Global Cost per Bid) ---
     st.subheader("Total Global Cost per Bid (chronological order)")
-    total_global = df_global_view.groupby('System')['Cout_Total'].sum().reset_index()
+    total_global = df_overall_view.groupby('System')['Cout_Total'].sum().reset_index()
     total_global['Date'] = total_global['System'].map(dates)
     total_global = total_global.sort_values('Date')
 
@@ -325,26 +326,27 @@ with tabs[0]:
     st.plotly_chart(fig_total, use_container_width=True)
 
     st.divider()
-    st.subheader("Global View - WBS Level 1 (Sum of all Work Packages)")
-    # --- GRAPHIQUE À BARRES (par WBS_2) ensuite ---
+    
+    # --- GRAPHIQUE À BARRES (par niveau sélectionné) ---
+    st.subheader(f"Global View - {level_choice} (Sum of all Work Packages)")
     fig_global = px.bar(
-        df_global_view,
-        x='WBS_2',
+        df_overall_view,
+        x=level_col,
         y='Cout_Total',
         color='System',
         barmode='group',
-        title="Total Raw Costs by WBS Level 1 (all sub-WPs included) (k€)",
+        title=f"Total Raw Costs by {level_choice} (all sub-WPs included) (k€)",
         category_orders={"System": chrono_systems},
-        labels={"Cout_Total": "Cost (k€)"}
+        labels={"Cout_Total": "Cost (k€)", level_col: "WBS Code"}
     )
     fig_global.update_xaxes(tickangle=45)
     st.plotly_chart(fig_global, use_container_width=True)
-    st.caption("This chart shows the sum of all underlying Work Packages for each Level 1 WBS code, across the three bids.")
+    st.caption(f"This chart shows the sum of all underlying Work Packages for each {level_choice} code, across the three bids.")
 
     st.divider()
 
-    # --- TABLEAUX RÉCAPITULATIFS ---
-    st.subheader("Aggregated Data per Work Package")
+    # --- TABLEAUX RÉCAPITULATIFS POUR LE NIVEAU SÉLECTIONNÉ ---
+    st.subheader(f"Aggregated Data per {level_choice}")
 
     def create_summary_table(value_col, unit_label):
         pivot = df_global.pivot_table(index='Code', columns='System', values=value_col, aggfunc='sum').fillna(0)
@@ -353,7 +355,7 @@ with tabs[0]:
         cols = ['Common_Name'] + [c for c in pivot.columns if c != 'Common_Name']
         pivot = pivot[cols]
         pivot.index.name = 'Code'
-        return pivot, cols[1:]  # retourne aussi les colonnes numériques
+        return pivot, cols[1:]
 
     st.write("**Raw Costs**")
     raw_table, num_cols_raw = create_summary_table('Cout_Total', "k€")
@@ -404,7 +406,7 @@ def draw_bridge(pivot_df, base_sys, target_sys, unit="k€"):
     fig.update_layout(title=f"Bridge: {base_sys} → {target_sys} ({unit})")
     return fig
 
-# --- ONGLET 2 : graph analysis ---
+# --- ONGLET 2 : WP analysis (analyse détaillée par work package) ---
 with tabs[1]:
     st.divider()
 
@@ -833,8 +835,8 @@ with tabs[5]:
 st.divider()
 st.subheader("📚 Audit Guide")
 st.markdown("""
-* **configure data**: View global overview of Level 1 costs. The mapping matrix above affects all tabs.
-* **graph analysis**: Raw and normalized cost views, with bridge charts. Select WPs via checkboxes (Select All/Clear All).
+* **overall analysis**: View global overview at the selected WBS level. The mapping matrix above affects all tabs.
+* **WP analysis**: Raw and normalized cost views per Work Package, with bridge charts. Select WPs via checkboxes (Select All/Clear All).
 * **Drift analysis**: Global trend and per-WP annualized drift (calculated across all systems).
 * **competitiveness deep dive**: Decomposition of cost variations into rate (inflation) and hours (technical) effects.
 * **IA Analysis**: AI commentary on drifts.
