@@ -98,13 +98,22 @@ if st.sidebar.button("🔄 Reset uploads"):
     st.rerun()
 
 # --- 6. PARSING DES FICHIERS ---
+def clean_wbs_code(val):
+    """Convertit une valeur en chaîne, la nettoie et retourne NaN si vide ou 'nan'."""
+    if pd.isna(val):
+        return np.nan
+    s = str(val).strip()
+    if s == '' or s.lower() in ['nan', 'none', 'null']:
+        return np.nan
+    return s
+
 def parse_complex_devis(df, system_name):
     data = df.iloc[3:].copy()
     # Nettoyer les colonnes WBS
-    data[0] = data[0].astype(str).str.strip()
-    data[1] = data[1].astype(str).str.strip()
-    data[2] = data[2].astype(str).str.strip()
-    data[3] = data[3].astype(str).str.strip()
+    data[0] = data[0].apply(clean_wbs_code)
+    data[1] = data[1].apply(clean_wbs_code)
+    data[2] = data[2].apply(clean_wbs_code)
+    data[3] = data[3].apply(clean_wbs_code)
     
     result = pd.DataFrame()
     result['WBS_2'] = data[0]
@@ -157,6 +166,89 @@ if not raw_dfs:
     st.warning("Please upload or place the three Devis files.")
     st.stop()
 
+# ========== CONSTRUCTION DE LA HIÉRARCHIE WBS (sans coûts) ==========
+def build_wbs_hierarchy(raw_dfs, system=None):
+    """
+    Construit une DataFrame hiérarchique à partir des colonnes WBS.
+    Ne contient que la structure, pas les coûts.
+    """
+    hierarchy_rows = []
+    
+    for sys_name, df in raw_dfs.items():
+        if system and sys_name != system:
+            continue
+            
+        df_sys = df.copy()
+        # Ne garder que les lignes avec au moins un code WBS
+        df_sys = df_sys.dropna(subset=['WBS_2', 'WBS_3', 'WBS_4', 'WBS_5'], how='all')
+        
+        # Ensemble pour éviter les doublons dans la structure
+        seen_nodes = set()
+        
+        for _, row in df_sys.iterrows():
+            wbs_2 = row['WBS_2']
+            wbs_3 = row['WBS_3']
+            wbs_4 = row['WBS_4']
+            wbs_5 = row['WBS_5']
+            
+            # Niveau 1
+            node_id = f"{sys_name}_L1_{wbs_2}"
+            if node_id not in seen_nodes and pd.notna(wbs_2):
+                seen_nodes.add(node_id)
+                hierarchy_rows.append({
+                    'id': node_id,
+                    'parent': '',
+                    'name': str(wbs_2),
+                    'level': 1,
+                    'system': sys_name,
+                    'path': str(wbs_2)
+                })
+            
+            # Niveau 2 (si existe)
+            if pd.notna(wbs_3):
+                node_id = f"{sys_name}_L2_{wbs_2}_{wbs_3}"
+                if node_id not in seen_nodes:
+                    seen_nodes.add(node_id)
+                    hierarchy_rows.append({
+                        'id': node_id,
+                        'parent': f"{sys_name}_L1_{wbs_2}",
+                        'name': str(wbs_3),
+                        'level': 2,
+                        'system': sys_name,
+                        'path': f"{wbs_2} / {wbs_3}"
+                    })
+            
+            # Niveau 3 (si existe)
+            if pd.notna(wbs_4):
+                node_id = f"{sys_name}_L3_{wbs_2}_{wbs_3}_{wbs_4}"
+                if node_id not in seen_nodes:
+                    seen_nodes.add(node_id)
+                    hierarchy_rows.append({
+                        'id': node_id,
+                        'parent': f"{sys_name}_L2_{wbs_2}_{wbs_3}",
+                        'name': str(wbs_4),
+                        'level': 3,
+                        'system': sys_name,
+                        'path': f"{wbs_2} / {wbs_3} / {wbs_4}"
+                    })
+            
+            # Niveau 4 (si existe)
+            if pd.notna(wbs_5):
+                node_id = f"{sys_name}_L4_{wbs_2}_{wbs_3}_{wbs_4}_{wbs_5}"
+                if node_id not in seen_nodes:
+                    seen_nodes.add(node_id)
+                    hierarchy_rows.append({
+                        'id': node_id,
+                        'parent': f"{sys_name}_L3_{wbs_2}_{wbs_3}_{wbs_4}",
+                        'name': str(wbs_5),
+                        'level': 4,
+                        'system': sys_name,
+                        'path': f"{wbs_2} / {wbs_3} / {wbs_4} / {wbs_5}"
+                    })
+    
+    df_hierarchy = pd.DataFrame(hierarchy_rows)
+    return df_hierarchy
+
 # ========== WBS LEVEL SELECTION (HORS ONGLETS) ==========
 st.subheader("WBS Level Selection")
 level_choice = st.selectbox(
@@ -179,10 +271,10 @@ level_col, level_num = level_map[level_choice]
 # ========== GESTION DU MAPPING (HORS ONGLETS) ==========
 st.subheader("Technical Normalization Matrix")
 
-# Construction de la liste des WP pour le niveau choisi
+# Construction de la liste des WP pour le niveau choisi, en ignorant les NaN
 wp_list = []
 for name, df in raw_dfs.items():
-    codes = df[level_col].unique()
+    codes = df[level_col].dropna().unique()  # Ne garder que les codes non vides
     for code in codes:
         wp_list.append({"System": name, "Original WP": code})
 df_init = pd.DataFrame(wp_list).drop_duplicates()
@@ -241,7 +333,11 @@ comp_dict = {(r["System"], r["Original WP"]): r["Complexity"] for _, r in edited
 all_rows = []
 for name, df in raw_dfs.items():
     df['Date'] = pd.to_datetime(dates[name])
-    grouped = df.groupby([level_col, 'Date']).agg({
+    # Filtrer pour ne garder que les lignes où la colonne du niveau sélectionné n'est pas vide
+    df_filtered = df[df[level_col].notna()].copy()
+    if df_filtered.empty:
+        continue
+    grouped = df_filtered.groupby([level_col, 'Date']).agg({
         'Cout_Total': 'sum',
         'Heures': 'sum',
         'Taux_Horaire': 'mean',
@@ -249,6 +345,10 @@ for name, df in raw_dfs.items():
     grouped['System'] = name
     grouped.rename(columns={level_col: 'Code'}, inplace=True)
     all_rows.append(grouped)
+
+if not all_rows:
+    st.error(f"No data found for the selected level {level_choice}. Please check your files.")
+    st.stop()
 
 df_global = pd.concat(all_rows, ignore_index=True).sort_values('Date')
 
@@ -279,34 +379,207 @@ st.session_state.chrono_order = df_global[['System', 'Date']].drop_duplicates().
 st.session_state.wp_drift_dict = None
 st.session_state.decomposition_data = None
 
-# ========== ORGANISATION PAR ONGLETS ==========
+# ========== FONCTIONS UTILITAIRES POUR LE FORMATAGE DES COÛTS ==========
+def format_cost_value(value, decimals=1):
+    """Formate une valeur en k€ en une chaîne avec l'unité appropriée (k€ ou M€)."""
+    if pd.isna(value):
+        return ""
+    if abs(value) >= 1000:
+        return f"{value/1000:.{decimals}f} M€"
+    else:
+        return f"{value:.{decimals}f} k€"
+
+def format_cost_series(series):
+    """Applique format_cost_value à une série."""
+    return series.apply(lambda x: format_cost_value(x, 1))
+
+def adjust_fig_axis_for_cost(fig, data_values, axis_title="Cost"):
+    """Ajuste le titre de l'axe Y et les données si nécessaire."""
+    max_val = data_values.max() if hasattr(data_values, 'max') else max(data_values)
+    if max_val >= 1000:
+        fig.update_traces(y=data_values/1000)
+        fig.update_layout(yaxis_title=f"{axis_title} (M€)")
+    else:
+        fig.update_layout(yaxis_title=f"{axis_title} (k€)")
+    fig.update_yaxes(tickformat=".1f")
+    return fig
+
+# ========== ORGANISATION PAR ONGLETS (9 onglets) ==========
 tabs = st.tabs([
-    "1- overall analysis",
-    "2- WP analysis",
-    "3- Bridges",
-    "4- Drift analysis",
-    "5- competitiveness deep dive",
-    "6- IA Analysis",
+    "🌳 WBS Structure",
+    "1- Input Data",
+    "2- Global Analysis",
+    "3- WP analysis",
+    "4- Bridges",
+    "5- Drift analysis",
+    "6- competitiveness deep dive",
+    "7- IA Analysis",
     "✅ Validation"
 ])
 
-# --- ONGLET 1 : overall analysis (utilise le niveau WBS sélectionné) ---
+# --- ONGLET 0 : WBS Structure ---
 with tabs[0]:
+    st.divider()
+    st.subheader("🌳 Work Breakdown Structure (WBS) - Hierarchical View")
+    st.caption("This shows the structure of work packages across all bids. No costs are displayed, only the hierarchy.")
+    
+    if not raw_dfs:
+        st.warning("Please upload or place the three Devis files first.")
+    else:
+        # Sélecteur de système
+        selected_system = st.selectbox(
+            "Select system to display (or 'All')",
+            options=["All"] + files_list,
+            index=0,
+            key="wbs_structure_system"
+        )
+        
+        # Construire la hiérarchie
+        with st.spinner("Building WBS structure..."):
+            system_param = None if selected_system == "All" else selected_system
+            df_hierarchy = build_wbs_hierarchy(raw_dfs, system_param)
+        
+        if df_hierarchy.empty:
+            st.warning("No hierarchical structure found.")
+        else:
+            # Créer un arbre interactif avec treemap (sans valeurs)
+            # On utilise des valeurs constantes pour que tous les rectangles aient la même taille
+            df_hierarchy['dummy_value'] = 1
+            
+            fig = px.treemap(
+                df_hierarchy,
+                ids='id',
+                parents='parent',
+                names='name',
+                values='dummy_value',
+                title=f"WBS Structure - {selected_system if selected_system != 'All' else 'All bids'}",
+                color='level',
+                color_continuous_scale='Blues',
+                hover_data={'path': True, 'level': True, 'system': True}
+            )
+            fig.update_traces(
+                textinfo="label",
+                hovertemplate='<b>%{label}</b><br>Level: %{customdata[1]}<br>System: %{customdata[2]}<br>Path: %{customdata[0]}<extra></extra>',
+                customdata=df_hierarchy[['path', 'level', 'system']].values
+            )
+            fig.update_layout(height=700, coloraxis_showscale=False)
+            st.plotly_chart(fig, use_container_width=True)
+            
+            st.info("""
+            💡 **How to read**: This treemap shows the hierarchical breakdown of work packages.
+            - Each rectangle represents a work package.
+            - Size is uniform (all packages same size) – only structure matters.
+            - Color indicates level (darker = deeper level).
+            - Click on a rectangle to zoom into its children.
+            """)
+            
+            # Afficher la structure sous forme de tableau
+            with st.expander("📋 Show hierarchical table"):
+                # Ajouter des colonnes pour faciliter la lecture
+                df_display = df_hierarchy.copy()
+                # Créer une colonne d'indentation pour visualiser la hiérarchie
+                df_display['indent'] = df_display['level'].apply(lambda x: '  ' * (x-1) + '└─ ')
+                df_display['display_name'] = df_display.apply(lambda row: f"{row['indent']}{row['name']} (L{row['level']})", axis=1)
+                df_display = df_display[['system', 'level', 'path', 'display_name']].sort_values(['system', 'path'])
+                st.dataframe(df_display, use_container_width=True, hide_index=True)
+
+# --- ONGLET 1 : Input Data (tableaux récapitulatifs avec totaux et ordre chronologique) ---
+with tabs[1]:
+    st.divider()
+    st.subheader(f"Aggregated Data per {level_choice}")
+
+    # Déterminer l'ordre chronologique des systèmes
+    chrono_systems = sorted(dates.keys(), key=lambda x: dates[x])
+    # Créer un mapping pour les nouveaux noms de colonnes avec date
+    system_display_names = {sys: f"{sys} ({dates[sys].strftime('%Y-%m-%d')})" for sys in chrono_systems}
+
+    def create_summary_table(value_col, unit_label):
+        pivot = df_global.pivot_table(index='Code', columns='System', values=value_col, aggfunc='sum').fillna(0)
+        # Ajouter le nom commun
+        names = df_global.groupby('Code')['Common_Name'].first()
+        pivot = pivot.join(names)
+        # Réinitialiser l'index pour que 'Code' devienne une colonne
+        pivot = pivot.reset_index()
+        # Renommer les colonnes des systèmes avec les dates
+        pivot.rename(columns=system_display_names, inplace=True)
+        # Réorganiser les colonnes : Code, Common_Name, puis les systèmes dans l'ordre chronologique
+        system_cols = [system_display_names[sys] for sys in chrono_systems]
+        cols = ['Code', 'Common_Name'] + system_cols
+        pivot = pivot[cols]
+        return pivot, system_cols
+
+    def add_total_row(pivot, num_cols):
+        """Ajoute une ligne 'TOTAL' avec la somme de chaque colonne numérique."""
+        pivot_with_total = pivot.copy()
+        total_values = {col: pivot_with_total[col].sum() for col in num_cols}
+        total_values['Code'] = 'TOTAL'
+        total_values['Common_Name'] = 'TOTAL'
+        total_df = pd.DataFrame([total_values])
+        pivot_with_total = pd.concat([pivot_with_total, total_df], ignore_index=True)
+        return pivot_with_total
+
+    def format_cost_dataframe(pivot, num_cols):
+        """Retourne un DataFrame avec les colonnes numériques formatées en texte (k€ ou M€)."""
+        df_display = pivot.copy()
+        for col in num_cols:
+            df_display[col] = df_display[col].apply(lambda x: format_cost_value(x, 1))
+        return df_display
+
+    st.write("**Raw Costs**")
+    raw_table, num_cols_raw = create_summary_table('Cout_Total', "k€")
+    raw_table_with_total = add_total_row(raw_table, num_cols_raw)
+    raw_table_display = format_cost_dataframe(raw_table_with_total, num_cols_raw)
+    st.dataframe(raw_table_display, use_container_width=True, hide_index=True)
+
+    st.write("**Normalized Costs**")
+    norm_table, num_cols_norm = create_summary_table('Normalized_Cost', "k€")
+    norm_table_with_total = add_total_row(norm_table, num_cols_norm)
+    norm_table_display = format_cost_dataframe(norm_table_with_total, num_cols_norm)
+    st.dataframe(norm_table_display, use_container_width=True, hide_index=True)
+
+    if df_global['Heures'].sum() > 0:
+        st.write("**Hours**")
+        hours_table, num_cols_hours = create_summary_table('Heures', "h")
+        hours_table_with_total = add_total_row(hours_table, num_cols_hours)
+        hours_display = hours_table_with_total.copy()
+        for col in num_cols_hours:
+            hours_display[col] = hours_display[col].apply(lambda x: f"{x:.0f} h")
+        st.dataframe(hours_display, use_container_width=True, hide_index=True)
+
+    if df_global['Taux_Horaire'].notna().any():
+        st.write("**Average Hourly Rates**")
+        rates_table, num_cols_rates = create_summary_table('Taux_Horaire', "€/h")
+        # Pas de total pour les taux
+        rates_display = rates_table.copy()
+        for col in num_cols_rates:
+            rates_display[col] = rates_display[col].apply(lambda x: f"{x:.2f} €/h")
+        st.dataframe(rates_display, use_container_width=True, hide_index=True)
+
+# --- ONGLET 2 : Global Analysis (graphiques globaux) ---
+with tabs[2]:
     st.divider()
 
     # Déterminer l'ordre chronologique des systèmes à partir des dates
     chrono_systems = sorted(dates.keys(), key=lambda x: dates[x])
 
-    # Calculer les totaux par niveau sélectionné et par système
+    # Calculer les totaux par niveau sélectionné et par système, en ignorant les NaN
     overall_view_data = []
     for name, df in raw_dfs.items():
         df_sys = df.copy()
         df_sys['System'] = name
-        # Utiliser la colonne WBS du niveau sélectionné
-        grouped = df_sys.groupby(level_col).agg({'Cout_Total': 'sum'}).reset_index()
+        # Filtrer les lignes où la colonne du niveau n'est pas vide
+        df_filtered = df_sys[df_sys[level_col].notna()].copy()
+        if df_filtered.empty:
+            continue
+        grouped = df_filtered.groupby(level_col).agg({'Cout_Total': 'sum'}).reset_index()
         grouped['System'] = name
         overall_view_data.append(grouped)
-    df_overall_view = pd.concat(overall_view_data, ignore_index=True)
+    
+    if overall_view_data:
+        df_overall_view = pd.concat(overall_view_data, ignore_index=True)
+    else:
+        st.warning(f"No data for level {level_choice}")
+        st.stop()
 
     # --- GRAPHIQUE LINÉAIRE (Total Global Cost per Bid) ---
     st.subheader("Total Global Cost per Bid (chronological order)")
@@ -323,8 +596,15 @@ with tabs[0]:
         text='System'
     )
     fig_total.update_traces(textposition='top center')
-    fig_total.update_layout(xaxis_title="Date", yaxis_title="Cost (k€)")
-    st.plotly_chart(fig_total, use_container_width=True)
+    # Ajustement de l'axe
+    max_val = total_global['Cout_Total'].max()
+    if max_val >= 1000:
+        fig_total.update_traces(y=total_global['Cout_Total']/1000)
+        fig_total.update_layout(yaxis_title="Cost (M€)")
+    else:
+        fig_total.update_layout(yaxis_title="Cost (k€)")
+    fig_total.update_yaxes(tickformat=".1f")
+    st.plotly_chart(fig_total, use_container_width=True, key="global_line")
 
     st.divider()
     
@@ -338,47 +618,19 @@ with tabs[0]:
         barmode='group',
         title=f"Total Raw Costs by {level_choice} (all sub-WPs included)",
         category_orders={"System": chrono_systems},
-        labels={"Cout_Total": "Cost (k€)", level_col: "WBS Code"}
+        labels={"Cout_Total": "Cost", level_col: "WBS Code"}
     )
     fig_global.update_xaxes(tickangle=45)
-    st.plotly_chart(fig_global, use_container_width=True)
+    # Ajustement de l'axe
+    max_val_bar = df_overall_view['Cout_Total'].max()
+    if max_val_bar >= 1000:
+        fig_global.update_traces(y=df_overall_view['Cout_Total']/1000)
+        fig_global.update_layout(yaxis_title="Cost (M€)")
+    else:
+        fig_global.update_layout(yaxis_title="Cost (k€)")
+    fig_global.update_yaxes(tickformat=".1f")
+    st.plotly_chart(fig_global, use_container_width=True, key="global_bar")
     st.caption(f"This chart shows the sum of all underlying Work Packages for each {level_choice} code, across the three bids.")
-
-    st.divider()
-
-    # --- TABLEAUX RÉCAPITULATIFS POUR LE NIVEAU SÉLECTIONNÉ ---
-    st.subheader(f"Aggregated Data per {level_choice}")
-
-    def create_summary_table(value_col, unit_label):
-        pivot = df_global.pivot_table(index='Code', columns='System', values=value_col, aggfunc='sum').fillna(0)
-        names = df_global.groupby('Code')['Common_Name'].first()
-        pivot = pivot.join(names)
-        cols = ['Common_Name'] + [c for c in pivot.columns if c != 'Common_Name']
-        pivot = pivot[cols]
-        pivot.index.name = 'Code'
-        return pivot, cols[1:]
-
-    st.write("**Raw Costs**")
-    raw_table, num_cols_raw = create_summary_table('Cout_Total', "k€")
-    styled_raw = raw_table.style.format("{:.2f} k€", subset=num_cols_raw)
-    st.dataframe(styled_raw, use_container_width=True)
-
-    st.write("**Normalized Costs**")
-    norm_table, num_cols_norm = create_summary_table('Normalized_Cost', "k€")
-    styled_norm = norm_table.style.format("{:.2f} k€", subset=num_cols_norm)
-    st.dataframe(styled_norm, use_container_width=True)
-
-    if df_global['Heures'].sum() > 0:
-        st.write("**Hours**")
-        hours_table, num_cols_hours = create_summary_table('Heures', "h")
-        styled_hours = hours_table.style.format("{:.0f} h", subset=num_cols_hours)
-        st.dataframe(styled_hours, use_container_width=True)
-
-    if df_global['Taux_Horaire'].notna().any():
-        st.write("**Average Hourly Rates**")
-        rates_table, num_cols_rates = create_summary_table('Taux_Horaire', "€/h")
-        styled_rates = rates_table.style.format("{:.2f} €/h", subset=num_cols_rates)
-        st.dataframe(styled_rates, use_container_width=True)
 
 def draw_bridge(pivot_df, base_sys, target_sys, title_prefix=""):
     if base_sys not in pivot_df.columns or target_sys not in pivot_df.columns:
@@ -397,21 +649,28 @@ def draw_bridge(pivot_df, base_sys, target_sys, title_prefix=""):
     values.append(pivot_df[target_sys].sum())
     measures.append("total")
     
+    # Ajustement de l'unité
+    max_val = max(abs(v) for v in values)
+    unit = "M€" if max_val >= 1000 else "k€"
+    factor = 1000 if unit == "M€" else 1
+    values_adjusted = [v/factor for v in values]
+    
     fig = go.Figure(go.Waterfall(
         measure=measures,
         x=labels,
-        y=values,
-        text=[f"{v:.1f}" for v in values],
+        y=values_adjusted,
+        text=[f"{v:.1f} {unit}" for v in values_adjusted],
         textposition="outside"
     ))
     fig.update_layout(
         title=f"{title_prefix}Bridge: {base_sys} → {target_sys}",
-        yaxis_title="Cost (k€)"
+        yaxis_title=f"Cost ({unit})"
     )
+    fig.update_yaxes(tickformat=".1f")
     return fig
 
-# --- ONGLET 2 : WP analysis (analyse détaillée par work package) ---
-with tabs[1]:
+# --- ONGLET 3 : WP analysis (analyse détaillée par work package) ---
+with tabs[3]:
     st.divider()
 
     if 'df_global' not in st.session_state:
@@ -467,36 +726,66 @@ with tabs[1]:
 
         st.subheader("Raw Data")
         if not df_filtered.empty:
+            # Bar chart raw
             fig_raw_bar = px.bar(df_filtered, x="Unique_Label", y="Cout_Total", color="System", 
                                  barmode="group", title="Raw Volume",
-                                 labels={"Cout_Total": "Cost (k€)", "Unique_Label": "Work Package"})
+                                 labels={"Cout_Total": "Cost", "Unique_Label": "Work Package"})
             fig_raw_bar.update_xaxes(tickangle=45)
+            max_val_raw = df_filtered['Cout_Total'].max()
+            if max_val_raw >= 1000:
+                fig_raw_bar.update_traces(y=df_filtered['Cout_Total']/1000)
+                fig_raw_bar.update_layout(yaxis_title="Cost (M€)")
+            else:
+                fig_raw_bar.update_layout(yaxis_title="Cost (k€)")
+            fig_raw_bar.update_yaxes(tickformat=".1f")
             st.plotly_chart(fig_raw_bar, use_container_width=True, key="raw_vol")
 
+            # Line chart raw
             fig_raw_line = px.line(df_filtered, x="Date", y="Cout_Total", color="Unique_Label", 
                                    markers=True, title="Raw Timeline",
-                                   labels={"Cout_Total": "Cost (k€)", "Date": "Date"})
+                                   labels={"Cout_Total": "Cost", "Date": "Date"})
+            if max_val_raw >= 1000:
+                fig_raw_line.update_traces(y=df_filtered['Cout_Total']/1000)
+                fig_raw_line.update_layout(yaxis_title="Cost (M€)")
+            else:
+                fig_raw_line.update_layout(yaxis_title="Cost (k€)")
+            fig_raw_line.update_yaxes(tickformat=".1f")
             st.plotly_chart(fig_raw_line, use_container_width=True, key="raw_time")
         else:
             st.info("No data for selected Work Packages.")
 
         st.subheader("Normalized Data")
         if not df_filtered.empty:
+            # Bar chart normalized
             fig_norm_bar = px.bar(df_filtered, x="Unique_Label", y="Normalized_Cost", color="System", 
                                   barmode="group", title="Normalized Volume",
-                                  labels={"Normalized_Cost": "Normalized Cost (k€)", "Unique_Label": "Work Package"})
+                                  labels={"Normalized_Cost": "Normalized Cost", "Unique_Label": "Work Package"})
             fig_norm_bar.update_xaxes(tickangle=45)
+            max_val_norm = df_filtered['Normalized_Cost'].max()
+            if max_val_norm >= 1000:
+                fig_norm_bar.update_traces(y=df_filtered['Normalized_Cost']/1000)
+                fig_norm_bar.update_layout(yaxis_title="Normalized Cost (M€)")
+            else:
+                fig_norm_bar.update_layout(yaxis_title="Normalized Cost (k€)")
+            fig_norm_bar.update_yaxes(tickformat=".1f")
             st.plotly_chart(fig_norm_bar, use_container_width=True, key="norm_vol")
 
+            # Line chart normalized
             fig_norm_line = px.line(df_filtered, x="Date", y="Normalized_Cost", color="Unique_Label", 
                                     markers=True, title="Normalized Timeline",
-                                    labels={"Normalized_Cost": "Normalized Cost (k€)", "Date": "Date"})
+                                    labels={"Normalized_Cost": "Normalized Cost", "Date": "Date"})
+            if max_val_norm >= 1000:
+                fig_norm_line.update_traces(y=df_filtered['Normalized_Cost']/1000)
+                fig_norm_line.update_layout(yaxis_title="Normalized Cost (M€)")
+            else:
+                fig_norm_line.update_layout(yaxis_title="Normalized Cost (k€)")
+            fig_norm_line.update_yaxes(tickformat=".1f")
             st.plotly_chart(fig_norm_line, use_container_width=True, key="norm_time")
         else:
             st.info("No data for selected Work Packages.")
 
-# --- ONGLET 3 : Bridges ---
-with tabs[2]:
+# --- ONGLET 4 : Bridges ---
+with tabs[4]:
     st.divider()
 
     if 'df_global' not in st.session_state:
@@ -539,8 +828,8 @@ with tabs[2]:
 
         st.info("💡 **Interpretation**: The chart starts with the total cost of the base bid. Each bar shows how much a specific Work Package adds or subtracts to reach the target bid total.")
 
-# --- ONGLET 4 : Drift analysis ---
-with tabs[3]:
+# --- ONGLET 5 : Drift analysis ---
+with tabs[5]:
     st.divider()
     if 'df_global' not in st.session_state:
         st.warning("Please configure the level and mapping in the first tab first.")
@@ -564,15 +853,25 @@ with tabs[3]:
                 annual_pct = 0
                 st.warning("Could not compute global drift (SVD error).")
             slope_month = slope_day * 30.44
+
+            # Ajustement de l'unité pour le graphique
+            max_val = total_norm['Normalized_Cost'].max()
+            unit = "M€" if max_val >= 1000 else "k€"
+            factor = 1000 if unit == "M€" else 1
+            y_adjusted = total_norm['Normalized_Cost'] / factor
+
             fig = go.Figure()
-            fig.add_trace(go.Scatter(x=total_norm['Date'], y=total_norm['Normalized_Cost'], 
+            fig.add_trace(go.Scatter(x=total_norm['Date'], y=y_adjusted, 
                                      mode='markers+lines', name='Total',
-                                     text=[f"{v:.1f}" for v in total_norm['Normalized_Cost']]))
+                                     text=[f"{v:.1f}" for v in y_adjusted]))
+            # Tendance linéaire
+            trend_y = np.polyval([slope_day/factor, coeffs[1]/factor if 'coeffs' in locals() else 0], [0, x.max()])
             fig.add_trace(go.Scatter(x=[total_norm['Date'].min(), total_norm['Date'].max()], 
-                                     y=np.polyval([slope_day, coeffs[1] if 'coeffs' in locals() else 0], [0, x.max()]), 
+                                     y=trend_y, 
                                      mode='lines', line=dict(dash='dash', color='red'), name='Trend'))
             fig.update_layout(title="Total Normalized Cost Over Time", 
-                             xaxis_title="Date", yaxis_title="Cost (k€)")
+                             xaxis_title="Date", yaxis_title=f"Cost ({unit})")
+            fig.update_yaxes(tickformat=".1f")
             st.plotly_chart(fig, use_container_width=True, key="global_drift")
             col1, col2, col3 = st.columns(3)
             col1.metric("Daily drift", f"{slope_day:+.2f} k€/day")
@@ -631,16 +930,22 @@ with tabs[3]:
                 sub = wp_drift_dict[selected_code]['data']
                 display_name = wp_drift_dict[selected_code]['display']
                 if not sub.empty:
-                    fig = px.line(sub, x='Date', y='Normalized_Cost', text='System', markers=True, 
+                    # Ajustement unité pour ce WP
+                    max_val_wp = sub['Normalized_Cost'].max()
+                    unit_wp = "M€" if max_val_wp >= 1000 else "k€"
+                    factor_wp = 1000 if unit_wp == "M€" else 1
+                    y_wp = sub['Normalized_Cost'] / factor_wp
+                    fig = px.line(sub, x='Date', y=y_wp, text='System', markers=True, 
                                  title=f"{display_name} normalized cost",
-                                 labels={"Normalized_Cost": "Cost (k€)", "Date": "Date"})
+                                 labels={"y": f"Cost ({unit_wp})", "Date": "Date"})
                     fig.update_traces(textposition='top center')
+                    fig.update_yaxes(tickformat=".1f")
                     st.plotly_chart(fig, use_container_width=True, key="wp_detail")
                 else:
                     st.warning("No data for this Work Package.")
 
-# --- ONGLET 5 : competitiveness deep dive ---
-with tabs[4]:
+# --- ONGLET 6 : competitiveness deep dive ---
+with tabs[6]:
     st.divider()
     if 'df_global' not in st.session_state:
         st.warning("Please configure the level and mapping in the first tab first.")
@@ -715,8 +1020,8 @@ with tabs[4]:
         else:
             st.info("Hourly rate data not available.")
 
-# --- ONGLET 6 : IA Analysis ---
-with tabs[5]:
+# --- ONGLET 7 : IA Analysis ---
+with tabs[7]:
     st.divider()
     if 'df_global' not in st.session_state:
         st.warning("Please configure the level and mapping in the first tab first.")
@@ -769,7 +1074,7 @@ with tabs[5]:
                     decomp_summary += f"- {d['WP']}: Total Δ = {d['Total Δ%']}, Rate share = {d['Rate share']}, Hours share = {d['Hours share']} → {d['Interpretation']}\n"
 
             prompt = f"""
-You are an expert in aerospace project analysis. We have calculated normalized cost drifts for three versions (Alpha, Beta, Gamma) with their actual dates. All costs are in k€ (thousands of euros).
+You are an expert in aerospace project analysis. We have calculated normalized cost drifts for three versions (Alpha, Beta, Gamma) with their actual dates. All costs are in k€ (thousands of euros) unless specified otherwise.
 
 **Global trend**:
 {global_trend}
@@ -808,7 +1113,7 @@ Answer concisely.
             if st.button("🧠 Full Strategic Audit", key="btn_audit"):
                 pivot_norm_unique = pivot_norm_code.rename(index=code_to_unique)
                 summary = f"""
-ACTUAL PROJECT DATA (all costs in k€):
+ACTUAL PROJECT DATA (all costs in k€ unless otherwise indicated):
 - Chronological order: {' -> '.join(chrono_order)}
 - Dates: { {k: v.strftime('%Y-%m-%d') for k,v in dates.items()} }
 - Analysis level: {st.session_state.level_choice}
@@ -816,7 +1121,7 @@ ACTUAL PROJECT DATA (all costs in k€):
 {pivot_norm_unique.to_string()}
 """
                 prompt_full = f"""
-Act as a Senior Airbus Project Controller. Analyze the cost drift based on the real data below. All costs are in k€ (thousands of euros).
+Act as a Senior Airbus Project Controller. Analyze the cost drift based on the real data below. All costs are in k€ (thousands of euros) unless specified otherwise.
 {summary}
 Provide a concise audit covering:
 1. Key Work Packages with significant cost variations.
@@ -840,8 +1145,8 @@ Provide a concise audit covering:
             if 'ai_audit' in st.session_state:
                 st.info(st.session_state.ai_audit)
 
-# --- ONGLET 7 : Validation ---
-with tabs[6]:
+# --- ONGLET 8 : Validation ---
+with tabs[8]:
     st.divider()
     st.sidebar.header("🧪 Validation Mode")
     oracle_file = st.sidebar.file_uploader("Load oracle file", type=["xlsx", "csv"], key="oracle_upload")
@@ -854,7 +1159,9 @@ with tabs[6]:
 st.divider()
 st.subheader("📚 Audit Guide")
 st.markdown("""
-* **overall analysis**: View global overview at the selected WBS level. The mapping matrix above affects all tabs.
+* **WBS Structure**: Visual tree of the Work Breakdown Structure across bids (no costs, pure hierarchy).
+* **Input Data**: Aggregated data tables at the selected WBS level. The mapping matrix above affects all tabs.
+* **Global Analysis**: Overall cost trends and breakdown by WBS level.
 * **WP analysis**: Raw and normalized cost views per Work Package. Select WPs via checkboxes (Select All/Clear All).
 * **Bridges**: Visual decomposition of cost differences between any two bids.
 * **Drift analysis**: Global trend and per-WP annualized drift (calculated across all systems).
@@ -862,5 +1169,5 @@ st.markdown("""
 * **IA Analysis**: AI commentary on drifts.
 * **Validation**: Compare against an oracle file.
 
-**Note**: All costs are displayed in k€ (thousands of euros). The numbers on the axes represent thousands of euros. Hours are in hours, rates in €/h.
+**Note**: All costs are displayed in k€ (thousands of euros) or M€ (millions of euros) depending on the magnitude. The numbers on the axes represent the chosen unit. Hours are in hours, rates in €/h.
 """)
