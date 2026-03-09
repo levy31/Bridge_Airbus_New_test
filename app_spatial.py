@@ -1169,7 +1169,7 @@ with tabs[5]:
                 else:
                     st.warning("No data for this Work Package.")
 
-# --- ONGLET 6 : competitiveness deep dive ---
+# --- ONGLET 6 : competitiveness deep dive (corrigé) ---
 with tabs[6]:
     if 'df_common' not in st.session_state:
         st.warning("Please apply the configuration first.")
@@ -1184,22 +1184,25 @@ with tabs[6]:
         if 'decomposition_data' in st.session_state and st.session_state.decomposition_data:
             decomp = st.session_state.decomposition_data
             df_decomp = pd.DataFrame(decomp)
-            # Count by category
-            counts = df_decomp['Interprétation'].str.extract(r'([🔴🟠🟡🟢🔵⚪])')[0].value_counts()
-            for emoji, count in counts.items():
-                label = {
-                    '🔴': 'very high increases',
-                    '🟠': 'high increases',
-                    '🟡': 'moderate increases',
-                    '🟢': 'decreases',
-                    '🔵': 'very high decreases',
-                    '⚪': 'stable / within norm'
-                }.get(emoji, 'other')
-                hot_points.append(f"{emoji} **{count}** work packages with {label}.")
-            # Worst hours effect
-            worst_hours = df_decomp.loc[df_decomp['heures_pct'].idxmax()] if not df_decomp.empty else None
-            if worst_hours is not None and worst_hours['heures_pct'] > 0:
-                hot_points.append(f"⏱️ Worst hours effect: **{worst_hours['Common Name']}** (+{worst_hours['heures_pct']:.1f}% of initial cost).")
+            # Count by category using the emoji in the Interpretation column
+            if 'Interpretation' in df_decomp.columns:
+                counts = df_decomp['Interpretation'].str.extract(r'([🔴🟠🟡🟢🔵⚪])')[0].value_counts()
+                for emoji, count in counts.items():
+                    label = {
+                        '🔴': 'very high increases',
+                        '🟠': 'high increases',
+                        '🟡': 'moderate increases',
+                        '🟢': 'decreases',
+                        '🔵': 'very high decreases',
+                        '⚪': 'stable / within norm'
+                    }.get(emoji, 'other')
+                    hot_points.append(f"{emoji} **{count}** work packages with {label}.")
+                # Worst hours effect
+                worst_hours = df_decomp.loc[df_decomp['heures_pct'].idxmax()] if not df_decomp.empty else None
+                if worst_hours is not None and worst_hours['heures_pct'] > 0:
+                    hot_points.append(f"⏱️ Worst hours effect: **{worst_hours['Common Name']}** (+{worst_hours['heures_pct']:.1f}% of initial cost).")
+            else:
+                hot_points.append("📊 Decomposition data available but format mismatch.")
         else:
             hot_points.append("📊 Decomposition not yet computed.")
         display_hot_topic("Hot Topics - Competitiveness", hot_points)
@@ -1219,7 +1222,7 @@ with tabs[6]:
                         first = sub.iloc[0]
                         last = sub.iloc[-1]
                         
-                        # Gestion des valeurs manquantes pour les heures/taux (toujours bruts)
+                        # Handle missing hours/rates
                         h1 = first['Heures'] if pd.notna(first['Heures']) else 0
                         r1 = first['Taux_Horaire'] if pd.notna(first['Taux_Horaire']) else 0
                         h2 = last['Heures'] if pd.notna(last['Heures']) else 0
@@ -1228,90 +1231,90 @@ with tabs[6]:
                         C1 = first[col_total]
                         C2 = last[col_total]
                         
-                        # Coûts autres (non Labour)
-                        cout_labour1 = (h1 * r1 / 1000) if h1>0 and r1>0 else 0
-                        cout_labour2 = (h2 * r2 / 1000) if h2>0 and r2>0 else 0
-                        other1 = C1 - cout_labour1
-                        other2 = C2 - cout_labour2
+                        # Other costs (non‑labour)
+                        labour_cost1 = (h1 * r1 / 1000) if h1>0 and r1>0 else 0
+                        labour_cost2 = (h2 * r2 / 1000) if h2>0 and r2>0 else 0
+                        other1 = C1 - labour_cost1
+                        other2 = C2 - labour_cost2
                         
-                        # Variation totale en % du coût initial
+                        # Total variation in % of initial cost
                         var_pct = ((C2 - C1) / C1) * 100 if C1 != 0 else 0
                         
-                        # Effets (décomposition additive exacte) en valeur absolue
-                        effet_taux_abs = (r2 - r1) * h1 / 1000
-                        effet_heures_abs = (h2 - h1) * r2 / 1000
-                        effet_autres_abs = other2 - other1
+                        # Effects (exact additive decomposition) in absolute value
+                        rate_effect_abs = (r2 - r1) * h1 / 1000
+                        hours_effect_abs = (h2 - h1) * r2 / 1000
+                        other_effect_abs = other2 - other1
                         
-                        # En pourcentage du coût initial
-                        effet_taux_pct = (effet_taux_abs / C1) * 100 if C1 != 0 else 0
-                        effet_heures_pct = (effet_heures_abs / C1) * 100 if C1 != 0 else 0
-                        effet_autres_pct = (effet_autres_abs / C1) * 100 if C1 != 0 else 0
+                        # As % of initial cost
+                        rate_effect_pct = (rate_effect_abs / C1) * 100 if C1 != 0 else 0
+                        hours_effect_pct = (hours_effect_abs / C1) * 100 if C1 != 0 else 0
+                        other_effect_pct = (other_effect_abs / C1) * 100 if C1 != 0 else 0
                         
-                        # Durée en années
+                        # Duration in years
                         delta_days = (last['Date'] - first['Date']).days
                         nb_ans = delta_days / 365.25
-                        var_annuelle_moy = var_pct / nb_ans if nb_ans > 0 else 0
+                        avg_annual_var = var_pct / nb_ans if nb_ans > 0 else 0
                         
-                        # Interprétation avec pastille de couleur
-                        abs_var_ann = abs(var_annuelle_moy)
+                        # Interpretation with coloured dot
+                        abs_avg_annual = abs(avg_annual_var)
                         if var_pct > 0:
-                            if abs_var_ann >= 20:
-                                pastille = "🔴"
-                                interprete = "Very high increase"
-                            elif abs_var_ann >= 10:
-                                pastille = "🟠"
-                                interprete = "High increase"
-                            elif abs_var_ann >= 3:
-                                pastille = "🟡"
-                                interprete = "Moderate increase"
+                            if abs_avg_annual >= 20:
+                                dot = "🔴"
+                                interpretation = "Very high increase"
+                            elif abs_avg_annual >= 10:
+                                dot = "🟠"
+                                interpretation = "High increase"
+                            elif abs_avg_annual >= 3:
+                                dot = "🟡"
+                                interpretation = "Moderate increase"
                             else:
-                                pastille = "⚪"
-                                interprete = "Increase within norm"
+                                dot = "⚪"
+                                interpretation = "Increase within norm"
                         elif var_pct < 0:
-                            if abs_var_ann >= 20:
-                                pastille = "🔵"
-                                interprete = "Very high decrease"
-                            elif abs_var_ann >= 10:
-                                pastille = "🟢"
-                                interprete = "High decrease"
-                            elif abs_var_ann >= 3:
-                                pastille = "🟢"
-                                interprete = "Moderate decrease"
+                            if abs_avg_annual >= 20:
+                                dot = "🔵"
+                                interpretation = "Very high decrease"
+                            elif abs_avg_annual >= 10:
+                                dot = "🟢"
+                                interpretation = "High decrease"
+                            elif abs_avg_annual >= 3:
+                                dot = "🟢"
+                                interpretation = "Moderate decrease"
                             else:
-                                pastille = "⚪"
-                                interprete = "Decrease within norm"
+                                dot = "⚪"
+                                interpretation = "Decrease within norm"
                         else:
-                            pastille = "⚪"
-                            interprete = "Stable"
+                            dot = "⚪"
+                            interpretation = "Stable"
                         
-                        interprete = f"{pastille} {interprete}"
+                        full_interpretation = f"{dot} {interpretation}"
                         
                         decomposition_data.append({
                             'Common Name': common,
                             'Total variation': f"{var_pct:+.1f}%",
-                            'Annual variation': f"{var_annuelle_moy:+.1f}%/year",
-                            'Rate effect': f"{effet_taux_pct:+.1f}%",
-                            'Hours effect': f"{effet_heures_pct:+.1f}%",
-                            'Other effect': f"{effet_autres_pct:+.1f}%",
-                            'Interpretation': interprete,
+                            'Annual variation': f"{avg_annual_var:+.1f}%/year",
+                            'Rate effect': f"{rate_effect_pct:+.1f}%",
+                            'Hours effect': f"{hours_effect_pct:+.1f}%",
+                            'Other effect': f"{other_effect_pct:+.1f}%",
+                            'Interpretation': full_interpretation,
                             # Raw data for chart
                             'var_pct': var_pct,
-                            'taux_pct': effet_taux_pct,
-                            'heures_pct': effet_heures_pct,
-                            'autres_pct': effet_autres_pct,
-                            'var_annuelle': var_annuelle_moy
+                            'taux_pct': rate_effect_pct,
+                            'heures_pct': hours_effect_pct,
+                            'autres_pct': other_effect_pct,
+                            'var_annuelle': avg_annual_var
                         })
                 
                 if decomposition_data:
                     st.session_state.decomposition_data = decomposition_data
                     
-                    # Tableau
+                    # Table
                     df_display = pd.DataFrame(decomposition_data)[
                         ['Common Name', 'Total variation', 'Annual variation', 'Rate effect', 'Hours effect', 'Other effect', 'Interpretation']
                     ]
                     st.dataframe(df_display, use_container_width=True, hide_index=True)
                     
-                    # Graphique à barres empilées
+                    # Stacked bar chart
                     df_plot = pd.DataFrame(decomposition_data)
                     
                     fig = go.Figure()
@@ -1343,7 +1346,7 @@ with tabs[6]:
                         textposition='inside'
                     ))
                     
-                    # Marqueur pour la variation totale
+                    # Marker for total variation
                     fig.add_trace(go.Scatter(
                         name='Total variation',
                         x=df_plot['Common Name'],
