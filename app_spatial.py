@@ -585,14 +585,11 @@ with tabs[0]:
     hot_points = []
     if raw_dfs:
         total_wp = sum(len(df[level_col].dropna().unique()) for df in raw_dfs.values())
-        hot_points.append(f"🧩 **{total_wp}** distinct work packages at level {level_choice}.")
-        min_date = min(dates.values()).strftime('%d/%m/%Y')
-        max_date = max(dates.values()).strftime('%d/%m/%Y')
-        hot_points.append(f"📅 Date range: {min_date} to {max_date}.")
-        hot_points.append("📊 Hierarchical view (no costs).")
+        hot_points.append(f"🧩 **{total_wp}** work packages across all bids at level {level_choice}.")
+        hot_points.append(f"📅 Bids: {', '.join([f'{sys} ({dates[sys].strftime('%d/%m/%Y')})' for sys in files_list])}.")
     else:
-        hot_points.append("❌ No files loaded.")
-    display_hot_topic("Hot Topics - Structure", hot_points)
+        hot_points.append("❌ No files loaded. Please upload the three Devis files.")
+    display_hot_topic("Hot Topics - WBS Structure", hot_points)
     
     if not raw_dfs:
         st.warning("Please upload files first.")
@@ -635,22 +632,52 @@ with tabs[1]:
         
         df_common = st.session_state.df_common
         level_choice = st.session_state.level_choice
-        chrono_systems = sorted(dates.keys(), key=lambda x: dates[x])
+        chrono_systems = sorted(files_list, key=lambda x: dates[x])
         system_display_names = {sys: f"{sys} ({dates[sys].strftime('%Y-%m-%d')})" for sys in chrono_systems}
 
-        # Hot Topics for Input Data
+        # Hot Topics for Input Data - Focus sur l'évolution temporelle
         hot_points = []
         col_cost = 'Cout_Total' if cost_type == 'Raw' else 'Normalized_Cost'
-        total_cost = df_common[col_cost].sum()
+        
+        # Nombre de lots analysés
         nb_lots = df_common['Common_Name'].nunique()
         hot_points.append(f"📦 **{nb_lots}** work packages (Common Names) analysed.")
-        hot_points.append(f"💰 Total {cost_type.lower()} cost: **{format_cost_value(total_cost)}**.")
-        if not df_common[df_common['Heures'] > 0].empty:
-            total_hours = df_common['Heures'].sum()
-            hot_points.append(f"⏱️ **{total_hours:,.0f}** total hours (labour).")
-        if not df_common[df_common['Taux_Horaire'] > 0].empty:
-            avg_rate = df_common[df_common['Taux_Horaire'] > 0]['Taux_Horaire'].mean()
-            hot_points.append(f"💶 Average hourly rate: **{avg_rate:.2f} €/h**.")
+        
+        # Coûts par devis (pas de somme globale)
+        costs_by_bid = df_common.groupby('System')[col_cost].sum()
+        for system in files_list:
+            if system in costs_by_bid.index:
+                hot_points.append(f"💰 {system} ({dates[system].strftime('%d/%m/%Y')}): **{format_cost_value(costs_by_bid[system])}**.")
+        
+        # Évolution entre premier et dernier devis
+        if len(chrono_systems) >= 2:
+            first_sys = chrono_systems[0]
+            last_sys = chrono_systems[-1]
+            first_cost = costs_by_bid.get(first_sys, 0)
+            last_cost = costs_by_bid.get(last_sys, 0)
+            if first_cost > 0:
+                var_pct = ((last_cost - first_cost) / first_cost) * 100
+                delta_days = (dates[last_sys] - dates[first_sys]).days
+                years = delta_days / 365.25
+                var_annual = var_pct / years if years > 0 else 0
+                hot_points.append(f"📊 Evolution {first_sys} → {last_sys}: **{var_pct:+.1f}%** ({var_annual:+.1f}%/year over {years:.1f} years).")
+        
+        # Heures (si disponibles) - par devis, pas de somme globale
+        if df_common['Heures'].notna().any() and df_common['Heures'].sum() > 0:
+            hours_by_bid = df_common.groupby('System')['Heures'].sum()
+            hot_points.append("⏱️ **Hours per bid:**")
+            for system in files_list:
+                if system in hours_by_bid.index and hours_by_bid[system] > 0:
+                    hot_points.append(f"   - {system}: **{hours_by_bid[system]:,.0f} h**")
+        
+        # Taux horaire moyen (si disponible) - par devis
+        if df_common['Taux_Horaire'].notna().any():
+            avg_rate = df_common[df_common['Taux_Horaire'] > 0].groupby('System')['Taux_Horaire'].mean()
+            hot_points.append("💶 **Average hourly rate per bid:**")
+            for system in files_list:
+                if system in avg_rate.index and not pd.isna(avg_rate[system]):
+                    hot_points.append(f"   - {system}: **{avg_rate[system]:.2f} €/h**")
+        
         display_hot_topic("Hot Topics - Input Data", hot_points)
 
         def create_common_summary_table(value_col):
@@ -725,13 +752,16 @@ with tabs[2]:
         # Hot Topics for Global Analysis
         hot_points = []
         col_cost = 'Cout_Total' if cost_type == 'Raw' else 'Normalized_Cost'
+        
+        # Coûts par devis
         total_by_system = st.session_state.df_common.groupby('System')[col_cost].sum().sort_values()
         if len(total_by_system) >= 2:
             min_sys = total_by_system.idxmin()
             max_sys = total_by_system.idxmax()
             hot_points.append(f"📈 Highest bid: **{max_sys}** ({format_cost_value(total_by_system[max_sys])})")
             hot_points.append(f"📉 Lowest bid: **{min_sys}** ({format_cost_value(total_by_system[min_sys])})")
-        # Overall variation
+        
+        # Variation globale
         total_by_date = st.session_state.df_common.groupby(['System', 'Date'])[col_cost].sum().reset_index()
         total_by_date = total_by_date.sort_values('Date')
         if len(total_by_date) >= 2:
@@ -742,6 +772,7 @@ with tabs[2]:
             years = delta_days / 365.25
             var_annual = var_pct / years if years > 0 else 0
             hot_points.append(f"📊 Total variation: **{var_pct:+.1f}%** ({var_annual:+.1f}%/year over {years:.1f} years).")
+        
         display_hot_topic("Hot Topics - Global Analysis", hot_points)
         
         st.subheader(f"Global Analysis ({cost_type} Costs)")
@@ -819,10 +850,15 @@ with tabs[3]:
         selected = st.session_state.get('selected_commons', [])
         if selected:
             df_sel = df_common[df_common['Common_Name'].isin(selected)]
-            total_sel = df_sel[col_cost].sum()
             hot_points.append(f"✅ **{len(selected)}** work packages selected (out of {len(common_names)}).")
-            hot_points.append(f"💰 Total selected cost: **{format_cost_value(total_sel)}**.")
-            # Work package with largest variation between first and last bid (if available)
+            
+            # Coûts par devis pour les lots sélectionnés
+            costs_by_bid = df_sel.groupby('System')[col_cost].sum()
+            for system in files_list:
+                if system in costs_by_bid.index:
+                    hot_points.append(f"💰 {system}: **{format_cost_value(costs_by_bid[system])}**.")
+            
+            # Work package with largest variation between first and last bid
             if len(df_sel['Date'].unique()) >= 2:
                 var_list = []
                 for lot in selected:
@@ -925,7 +961,7 @@ with tabs[4]:
         pivot = st.session_state.pivot_norm_common if cost_type == 'Normalized' else st.session_state.pivot_raw_common
         files_list = ["Devis_Alpha", "Devis_Beta", "Devis_Gamma"]
 
-        # Hot Topics for Bridges (depends on selection)
+        # Hot Topics for Bridges
         hot_points = []
         base_n = st.session_state.get('base_bridge', files_list[0])
         target_n = st.session_state.get('target_bridge', files_list[1] if len(files_list)>1 else files_list[0])
@@ -1061,7 +1097,8 @@ with tabs[5]:
                 hot_points.append(f"📉 Global drift: **{annual_pct:+.1f}%/year**.")
             except:
                 hot_points.append("📉 Global drift: could not compute.")
-        # Work packages with highest drift (extracted from dictionary later, but we can use precomputed)
+        
+        # Work packages with highest drift
         wp_drift_dict = st.session_state.get('wp_drift_dict', {})
         if wp_drift_dict:
             drifts = [(common, vals['annual']) for common, vals in wp_drift_dict.items() if vals['annual'] is not None]
@@ -1169,7 +1206,7 @@ with tabs[5]:
                 else:
                     st.warning("No data for this Work Package.")
 
-# --- ONGLET 6 : competitiveness deep dive (corrigé) ---
+# --- ONGLET 6 : competitiveness deep dive ---
 with tabs[6]:
     if 'df_common' not in st.session_state:
         st.warning("Please apply the configuration first.")
@@ -1183,29 +1220,37 @@ with tabs[6]:
         hot_points = []
         if 'decomposition_data' in st.session_state and st.session_state.decomposition_data:
             decomp = st.session_state.decomposition_data
-            df_decomp = pd.DataFrame(decomp)
-            # Count by category using the emoji in the Interpretation column
-            if 'Interpretation' in df_decomp.columns:
-                counts = df_decomp['Interpretation'].str.extract(r'([🔴🟠🟡🟢🔵⚪])')[0].value_counts()
-                for emoji, count in counts.items():
-                    label = {
-                        '🔴': 'very high increases',
-                        '🟠': 'high increases',
-                        '🟡': 'moderate increases',
-                        '🟢': 'decreases',
-                        '🔵': 'very high decreases',
-                        '⚪': 'stable / within norm'
-                    }.get(emoji, 'other')
-                    hot_points.append(f"{emoji} **{count}** work packages with {label}.")
-                # Worst hours effect
-                worst_hours = df_decomp.loc[df_decomp['heures_pct'].idxmax()] if not df_decomp.empty else None
-                if worst_hours is not None and worst_hours['heures_pct'] > 0:
-                    hot_points.append(f"⏱️ Worst hours effect: **{worst_hours['Common Name']}** (+{worst_hours['heures_pct']:.1f}% of initial cost).")
+            if decomp:
+                df_decomp = pd.DataFrame(decomp)
+                if not df_decomp.empty and 'Interpretation' in df_decomp.columns:
+                    emoji_series = df_decomp['Interpretation'].str.extract(r'([🔴🟠🟡🟢🔵⚪])')[0]
+                    if not emoji_series.isna().all():
+                        counts = emoji_series.value_counts()
+                        for emoji, count in counts.items():
+                            label = {
+                                '🔴': 'very high increases',
+                                '🟠': 'high increases',
+                                '🟡': 'moderate increases',
+                                '🟢': 'decreases',
+                                '🔵': 'very high decreases',
+                                '⚪': 'stable / within norm'
+                            }.get(emoji, 'other')
+                            hot_points.append(f"{emoji} **{count}** work packages with {label}.")
+                    
+                    if 'heures_pct' in df_decomp.columns and not df_decomp['heures_pct'].isna().all():
+                        worst_hours_idx = df_decomp['heures_pct'].idxmax()
+                        worst_hours = df_decomp.loc[worst_hours_idx] if pd.notna(worst_hours_idx) else None
+                        if worst_hours is not None and worst_hours['heures_pct'] > 0:
+                            hot_points.append(f"⏱️ Worst hours effect: **{worst_hours['Common Name']}** (+{worst_hours['heures_pct']:.1f}% of initial cost).")
+                else:
+                    hot_points.append("📊 Decomposition data available but format mismatch.")
             else:
-                hot_points.append("📊 Decomposition data available but format mismatch.")
+                hot_points.append("📊 Decomposition data is empty.")
         else:
-            hot_points.append("📊 Decomposition not yet computed.")
-        display_hot_topic("Hot Topics - Competitiveness", hot_points)
+            hot_points.append("📊 Decomposition not yet computed. Click 'Apply Configuration' first.")
+        
+        if hot_points:
+            display_hot_topic("Hot Topics - Competitiveness", hot_points)
 
         st.subheader("Rate vs Technical Competitiveness Analysis")
         st.caption(f"Analysis of cost variation between the first and last bid, decomposed into rate, hours and other cost effects. Percentages are relative to the **{cost_type.lower()} initial cost** of the work package. Coloured dots indicate the magnitude of the average annual variation.")
