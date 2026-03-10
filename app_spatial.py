@@ -635,7 +635,7 @@ with tabs[1]:
         chrono_systems = sorted(files_list, key=lambda x: dates[x])
         system_display_names = {sys: f"{sys} ({dates[sys].strftime('%Y-%m-%d')})" for sys in chrono_systems}
 
-        # Hot Topics for Input Data - Focus sur l'évolution temporelle
+        # Hot Topics for Input Data - UNIQUEMENT les données brutes, pas d'évolution
         hot_points = []
         col_cost = 'Cout_Total' if cost_type == 'Raw' else 'Normalized_Cost'
         
@@ -648,19 +648,6 @@ with tabs[1]:
         for system in files_list:
             if system in costs_by_bid.index:
                 hot_points.append(f"💰 {system} ({dates[system].strftime('%d/%m/%Y')}): **{format_cost_value(costs_by_bid[system])}**.")
-        
-        # Évolution entre premier et dernier devis
-        if len(chrono_systems) >= 2:
-            first_sys = chrono_systems[0]
-            last_sys = chrono_systems[-1]
-            first_cost = costs_by_bid.get(first_sys, 0)
-            last_cost = costs_by_bid.get(last_sys, 0)
-            if first_cost > 0:
-                var_pct = ((last_cost - first_cost) / first_cost) * 100
-                delta_days = (dates[last_sys] - dates[first_sys]).days
-                years = delta_days / 365.25
-                var_annual = var_pct / years if years > 0 else 0
-                hot_points.append(f"📊 Evolution {first_sys} → {last_sys}: **{var_pct:+.1f}%** ({var_annual:+.1f}%/year over {years:.1f} years).")
         
         # Heures (si disponibles) - par devis, pas de somme globale
         if df_common['Heures'].notna().any() and df_common['Heures'].sum() > 0:
@@ -749,7 +736,7 @@ with tabs[2]:
         cost_type = st.radio("Cost type", ["Raw", "Normalized"], horizontal=True, key="cost_type_global")
         st.session_state.cost_type = cost_type
         
-        # Hot Topics for Global Analysis
+        # Hot Topics for Global Analysis - avec décomposition
         hot_points = []
         col_cost = 'Cout_Total' if cost_type == 'Raw' else 'Normalized_Cost'
         
@@ -761,17 +748,79 @@ with tabs[2]:
             hot_points.append(f"📈 Highest bid: **{max_sys}** ({format_cost_value(total_by_system[max_sys])})")
             hot_points.append(f"📉 Lowest bid: **{min_sys}** ({format_cost_value(total_by_system[min_sys])})")
         
-        # Variation globale
+        # Variation globale entre premier et dernier devis
         total_by_date = st.session_state.df_common.groupby(['System', 'Date'])[col_cost].sum().reset_index()
         total_by_date = total_by_date.sort_values('Date')
         if len(total_by_date) >= 2:
             first = total_by_date.iloc[0]
             last = total_by_date.iloc[-1]
-            var_pct = ((last[col_cost] - first[col_cost]) / first[col_cost]) * 100
+            
+            first_sys = first['System']
+            last_sys = last['System']
+            first_cost = first[col_cost]
+            last_cost = last[col_cost]
+            
+            var_pct = ((last_cost - first_cost) / first_cost) * 100
             delta_days = (last['Date'] - first['Date']).days
             years = delta_days / 365.25
             var_annual = var_pct / years if years > 0 else 0
-            hot_points.append(f"📊 Total variation: **{var_pct:+.1f}%** ({var_annual:+.1f}%/year over {years:.1f} years).")
+            
+            hot_points.append(f"📊 **Global variation {first_sys} → {last_sys}:** **{var_pct:+.1f}%** ({var_annual:+.1f}%/year over {years:.1f} years).")
+            
+            # --- DÉCOMPOSITION DE LA VARIATION GLOBALE ---
+            # Récupérer les données pour le premier et dernier devis au niveau Common Name
+            df_first = st.session_state.df_common[st.session_state.df_common['System'] == first_sys]
+            df_last = st.session_state.df_common[st.session_state.df_common['System'] == last_sys]
+            
+            # Fusionner sur Common Name pour avoir les données des deux devis
+            df_merged = pd.merge(df_first[['Common_Name', 'Cout_Total', 'Heures', 'Taux_Horaire']], 
+                                 df_last[['Common_Name', 'Cout_Total', 'Heures', 'Taux_Horaire']], 
+                                 on='Common_Name', 
+                                 suffixes=('_first', '_last'),
+                                 how='inner')
+            
+            if not df_merged.empty and 'Heures_first' in df_merged.columns and 'Taux_Horaire_first' in df_merged.columns:
+                # Calculer les effets globaux (somme sur tous les lots)
+                total_rate_effect = 0
+                total_hours_effect = 0
+                total_other_effect = 0
+                total_initial_cost = first_cost
+                
+                for _, row in df_merged.iterrows():
+                    # Heures et taux
+                    h1 = row['Heures_first'] if pd.notna(row['Heures_first']) else 0
+                    r1 = row['Taux_Horaire_first'] if pd.notna(row['Taux_Horaire_first']) else 0
+                    h2 = row['Heures_last'] if pd.notna(row['Heures_last']) else 0
+                    r2 = row['Taux_Horaire_last'] if pd.notna(row['Taux_Horaire_last']) else 0
+                    
+                    # Coûts totaux
+                    c1 = row['Cout_Total_first']
+                    c2 = row['Cout_Total_last']
+                    
+                    # Coûts autres
+                    labour1 = (h1 * r1 / 1000) if h1 > 0 and r1 > 0 else 0
+                    labour2 = (h2 * r2 / 1000) if h2 > 0 and r2 > 0 else 0
+                    other1 = c1 - labour1
+                    other2 = c2 - labour2
+                    
+                    # Effets en valeur absolue
+                    total_rate_effect += (r2 - r1) * h1 / 1000
+                    total_hours_effect += (h2 - h1) * r2 / 1000
+                    total_other_effect += (other2 - other1)
+                
+                # Convertir en pourcentage du coût initial total
+                rate_pct = (total_rate_effect / total_initial_cost) * 100 if total_initial_cost != 0 else 0
+                hours_pct = (total_hours_effect / total_initial_cost) * 100 if total_initial_cost != 0 else 0
+                other_pct = (total_other_effect / total_initial_cost) * 100 if total_initial_cost != 0 else 0
+                
+                hot_points.append(f"   └─ **Rate effect:** {rate_pct:+.1f}%")
+                hot_points.append(f"   └─ **Hours effect:** {hours_pct:+.1f}%")
+                hot_points.append(f"   └─ **Other effect:** {other_pct:+.1f}%")
+                
+                # Interprétation
+                if abs(hours_pct) > 10:
+                    comp_interp = "🔴 Significant technical competitiveness loss" if hours_pct > 0 else "🟢 Significant technical competitiveness gain"
+                    hot_points.append(f"   └─ {comp_interp}")
         
         display_hot_topic("Hot Topics - Global Analysis", hot_points)
         
